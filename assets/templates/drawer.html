@@ -10,7 +10,7 @@
                 <i class="fa-regular fa-clock"></i>
                 Horae 时光记忆
             </div>
-            <span class="horae-version">v1.6.5</span>
+            <span class="horae-version">v1.7.0</span>
         </div>
         
         <!-- 标签页导航 -->
@@ -622,6 +622,98 @@
                 </div>
 
                 <div class="horae-settings-section">
+                    <div class="horae-section-header horae-collapse-header" id="horae-vector-collapse-toggle">
+                        <i class="fa-solid fa-brain"></i>
+                        向量记忆 (Beta)
+                        <i class="fa-solid fa-chevron-down horae-collapse-icon collapsed"></i>
+                    </div>
+                    <div id="horae-vector-collapse-body" style="display: none;">
+                        <span class="horae-setting-hint" style="margin-bottom: 12px;">
+                            <i class="fa-solid fa-circle-info"></i>
+                            使用本地 Embedding 模型对 Horae 标签数据做向量检索，自动召回相关历史片段注入给 AI。<br>
+                            首次使用会下载约 <strong>25MB</strong> 量化模型到浏览器缓存，之后秒启。<br>
+                            运行时额外占用约 <strong>50-80MB</strong> 内存，计算在后台 Web Worker 进行，<strong>不会卡住界面</strong>。<br>
+                            ⚠ <strong>2GB 内存以下的手机设备</strong>建议关闭此功能。
+                        </span>
+                        <div class="horae-setting-item">
+                            <label>
+                                <input type="checkbox" id="horae-setting-vector-enabled">
+                                启用向量记忆
+                            </label>
+                        </div>
+                        <div id="horae-vector-options" style="display: none;">
+                            <div class="horae-setting-item">
+                                <label>
+                                    嵌入模型
+                                    <select id="horae-setting-vector-model">
+                                        <option value="Xenova/bge-small-zh-v1.5">bge-small-zh-v1.5 (中文优化, ~24MB)</option>
+                                        <option value="Xenova/multilingual-e5-small">multilingual-e5-small (多语言, ~33MB)</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <div class="horae-setting-item">
+                                <label>
+                                    量化精度
+                                    <select id="horae-setting-vector-dtype">
+                                        <option value="q8">q8（推荐，精度损失极小）</option>
+                                        <option value="q4">q4（速度快/内存省，精度略降）</option>
+                                    </select>
+                                </label>
+                                <span class="horae-setting-sub-hint">q4 适合大多数设备；q8 精度更高但体积翻倍。</span>
+                            </div>
+                            <div class="horae-setting-item">
+                                <label>
+                                    召回条数 (Top-K)
+                                    <input type="number" id="horae-setting-vector-topk" min="1" max="10" value="5">
+                                </label>
+                                <span class="horae-setting-sub-hint">每次发送消息时，从向量库召回最相关的 K 条记忆注入上下文。</span>
+                            </div>
+                            <div class="horae-setting-item">
+                                <label>
+                                    最低相似度阈值
+                                    <input type="number" id="horae-setting-vector-threshold" min="0.3" max="0.95" step="0.01" value="0.72">
+                                </label>
+                                <span class="horae-setting-sub-hint">相似度低于此值的记忆不会被召回。提高此值可减少噪音。</span>
+                            </div>
+                            <div class="horae-setting-item">
+                                <label>
+                                    全文回顾条数
+                                    <input type="number" id="horae-setting-vector-fulltext-count" min="0" max="5" value="3">
+                                </label>
+                                <span class="horae-setting-sub-hint">排名前 N 且达到全文阈值的召回结果会发送原始正文而非摘要。设为 0 关闭此功能。</span>
+                            </div>
+                            <div class="horae-setting-item">
+                                <label>
+                                    全文回顾阈值
+                                    <input type="number" id="horae-setting-vector-fulltext-threshold" min="0.6" max="1.0" step="0.01" value="0.9">
+                                </label>
+                                <span class="horae-setting-sub-hint">只有相似度达到此值的高置信度结果才会发送全文，避免不相关内容浪费 Token。</span>
+                            </div>
+                            <div class="horae-vector-status">
+                                <span id="horae-vector-status-text">模型未加载</span>
+                                <span id="horae-vector-index-count"></span>
+                            </div>
+                            <div class="horae-vector-progress" id="horae-vector-progress" style="display:none;">
+                                <div class="horae-progress-bar">
+                                    <div class="horae-progress-fill" id="horae-vector-progress-fill" style="width: 0%"></div>
+                                </div>
+                                <span id="horae-vector-progress-text"></span>
+                            </div>
+                            <div class="horae-vector-buttons">
+                                <button id="horae-btn-vector-build" class="horae-vector-btn build" title="为当前对话的所有消息构建向量索引">
+                                    <i class="fa-solid fa-hammer"></i>
+                                    <span>构建索引</span>
+                                </button>
+                                <button id="horae-btn-vector-clear" class="horae-vector-btn clear" title="清除当前对话的向量索引">
+                                    <i class="fa-solid fa-trash-can"></i>
+                                    <span>清除索引</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="horae-settings-section">
                     <div class="horae-section-header horae-collapse-header" id="horae-prompt-collapse-toggle">
                         <i class="fa-solid fa-scroll"></i>
                         自定义提示词
@@ -792,7 +884,7 @@
                 </div>
                 
                 <div class="horae-about">
-                    <p>Horae v1.6.5 | 作者: SenriYuki</p>
+                    <p>Horae v1.7.0 | 作者: SenriYuki</p>
                     <p>基于时间锚点的AI记忆增强系统</p>
                 </div>
             </div>

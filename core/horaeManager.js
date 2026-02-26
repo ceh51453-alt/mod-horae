@@ -228,7 +228,6 @@ class HoraeManager {
                         
                         if (existingKey !== name) {
                             delete state.items[existingKey];
-                            console.log(`[Horae] 物品数量更新: ${existingKey} → ${name}`);
                         }
                         state.items[name] = mergedItem;
                     } else {
@@ -246,7 +245,6 @@ class HoraeManager {
                         if (itemName.toLowerCase() === deletedItem.toLowerCase() ||
                             itemBase === deleteBase) {
                             delete state.items[itemName];
-                            console.log(`[Horae] 物品已删除: ${itemName}`);
                         }
                     }
                 }

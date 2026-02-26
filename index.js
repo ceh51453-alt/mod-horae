@@ -3,7 +3,7 @@
  * 基于时间锚点的AI记忆增强系统
  * 
  * 作者: SenriYuki
- * 版本: 1.6.4
+ * 版本: 1.7.0
  */
 
 import { renderExtensionTemplateAsync, getContext, extension_settings } from '/scripts/extensions.js';
@@ -11,6 +11,7 @@ import { getSlideToggleOptions, saveSettingsDebounced, eventSource, event_types 
 import { slideToggle } from '/lib.js';
 
 import { horaeManager, createEmptyMeta } from './core/horaeManager.js';
+import { vectorManager } from './core/vectorManager.js';
 import { calculateRelativeTime, calculateDetailedRelativeTime, formatRelativeTime, generateTimeReference, getCurrentSystemTime, formatStoryDate, formatFullDateTime, parseStoryDate } from './utils/timeUtils.js';
 
 // ============================================
@@ -19,7 +20,7 @@ import { calculateRelativeTime, calculateDetailedRelativeTime, formatRelativeTim
 const EXTENSION_NAME = 'horae';
 const EXTENSION_FOLDER = `third-party/SillyTavern-Horae`;
 const TEMPLATE_PATH = `${EXTENSION_FOLDER}/assets/templates`;
-const VERSION = '1.6.4';
+const VERSION = '1.7.0';
 
 // 配套正则规则（自动注入ST原生正则系统）
 const HORAE_REGEX_RULES = [
@@ -127,6 +128,14 @@ const DEFAULT_SETTINGS = {
     autoSummaryModel: '',           // 独立API模型名称
     // 教学
     tutorialCompleted: false,       // 新用户导航教学是否已完成
+    // 向量记忆
+    vectorEnabled: false,
+    vectorModel: 'Xenova/bge-small-zh-v1.5',
+    vectorDtype: 'q8',
+    vectorTopK: 5,
+    vectorThreshold: 0.72,
+    vectorFullTextCount: 3,
+    vectorFullTextThreshold: 0.9,
 };
 
 // ============================================
@@ -6975,6 +6984,71 @@ function initSettingsEvents() {
         body.slideToggle(200);
         icon.toggleClass('collapsed');
     });
+
+    // 向量记忆区域折叠切换
+    $('#horae-vector-collapse-toggle').on('click', function() {
+        const body = $('#horae-vector-collapse-body');
+        const icon = $(this).find('.horae-collapse-icon');
+        body.slideToggle(200);
+        icon.toggleClass('collapsed');
+    });
+
+    $('#horae-setting-vector-enabled').on('change', function() {
+        settings.vectorEnabled = this.checked;
+        saveSettings();
+        $('#horae-vector-options').toggle(this.checked);
+        if (this.checked && !vectorManager.isReady) {
+            _initVectorModel();
+        } else if (!this.checked) {
+            vectorManager.dispose();
+            _updateVectorStatus();
+        }
+    });
+
+    $('#horae-setting-vector-model').on('change', function() {
+        settings.vectorModel = this.value;
+        saveSettings();
+        if (settings.vectorEnabled) {
+            vectorManager.clearIndex().then(() => {
+                showToast('模型已更换，索引已清除，正在加载新模型...', 'info');
+                _initVectorModel();
+            });
+        }
+    });
+
+    $('#horae-setting-vector-dtype').on('change', function() {
+        settings.vectorDtype = this.value;
+        saveSettings();
+        if (settings.vectorEnabled) {
+            vectorManager.clearIndex().then(() => {
+                showToast('量化精度已更换，索引已清除，正在重新加载...', 'info');
+                _initVectorModel();
+            });
+        }
+    });
+
+    $('#horae-setting-vector-topk').on('change', function() {
+        settings.vectorTopK = parseInt(this.value) || 5;
+        saveSettings();
+    });
+
+    $('#horae-setting-vector-threshold').on('change', function() {
+        settings.vectorThreshold = parseFloat(this.value) || 0.72;
+        saveSettings();
+    });
+
+    $('#horae-setting-vector-fulltext-count').on('change', function() {
+        settings.vectorFullTextCount = parseInt(this.value) || 0;
+        saveSettings();
+    });
+
+    $('#horae-setting-vector-fulltext-threshold').on('change', function() {
+        settings.vectorFullTextThreshold = parseFloat(this.value) || 0.9;
+        saveSettings();
+    });
+
+    $('#horae-btn-vector-build').on('click', _buildVectorIndex);
+    $('#horae-btn-vector-clear').on('click', _clearVectorIndex);
 }
 
 /**
@@ -7070,6 +7144,125 @@ function syncSettingsToUI() {
     // 自定义CSS
     $('#horae-custom-css').val(settings.customCSS || '');
     applyCustomCSS();
+
+    // 向量记忆
+    $('#horae-setting-vector-enabled').prop('checked', !!settings.vectorEnabled);
+    $('#horae-vector-options').toggle(!!settings.vectorEnabled);
+    $('#horae-setting-vector-model').val(settings.vectorModel || 'Xenova/bge-small-zh-v1.5');
+    $('#horae-setting-vector-dtype').val(settings.vectorDtype || 'q8');
+    $('#horae-setting-vector-topk').val(settings.vectorTopK || 5);
+    $('#horae-setting-vector-threshold').val(settings.vectorThreshold || 0.72);
+    $('#horae-setting-vector-fulltext-count').val(settings.vectorFullTextCount ?? 3);
+    $('#horae-setting-vector-fulltext-threshold').val(settings.vectorFullTextThreshold ?? 0.9);
+    _updateVectorStatus();
+}
+
+// ============================================
+// 向量记忆
+// ============================================
+
+function _deriveChatId(ctx) {
+    if (ctx?.chatId) return ctx.chatId;
+    const chat = ctx?.chat;
+    if (chat?.length > 0 && chat[0].create_date) return `chat_${chat[0].create_date}`;
+    return 'unknown';
+}
+
+function _updateVectorStatus() {
+    const statusEl = document.getElementById('horae-vector-status-text');
+    const countEl = document.getElementById('horae-vector-index-count');
+    if (!statusEl) return;
+    if (vectorManager.isLoading) {
+        statusEl.textContent = '模型加载中...';
+    } else if (vectorManager.isReady) {
+        statusEl.textContent = `✓ ${vectorManager.modelName.split('/').pop()} (${vectorManager.dimensions}维)`;
+    } else {
+        statusEl.textContent = settings.vectorEnabled ? '模型未加载' : '已关闭';
+    }
+    if (countEl) {
+        countEl.textContent = vectorManager.vectors.size > 0
+            ? `| 索引: ${vectorManager.vectors.size} 条`
+            : '';
+    }
+}
+
+async function _initVectorModel() {
+    if (vectorManager.isLoading) return;
+    const progressEl = document.getElementById('horae-vector-progress');
+    const fillEl = document.getElementById('horae-vector-progress-fill');
+    const textEl = document.getElementById('horae-vector-progress-text');
+    if (progressEl) progressEl.style.display = 'block';
+
+    try {
+        await vectorManager.initModel(
+            settings.vectorModel || 'Xenova/bge-small-zh-v1.5',
+            settings.vectorDtype || 'q8',
+            (info) => {
+                if (info.status === 'progress' && fillEl && textEl) {
+                    const pct = info.progress?.toFixed(0) || 0;
+                    fillEl.style.width = `${pct}%`;
+                    textEl.textContent = `下载模型... ${pct}%`;
+                } else if (info.status === 'done' && textEl) {
+                    textEl.textContent = '模型加载中...';
+                }
+                _updateVectorStatus();
+            }
+        );
+
+        const ctx = getContext();
+        const chatId = _deriveChatId(ctx);
+        await vectorManager.loadChat(chatId, horaeManager.getChat());
+
+        showToast(`向量模型已加载: ${vectorManager.modelName.split('/').pop()}`, 'success');
+    } catch (err) {
+        console.error('[Horae] 向量模型加载失败:', err);
+        showToast(`向量模型加载失败: ${err.message}`, 'error');
+    } finally {
+        if (progressEl) progressEl.style.display = 'none';
+        _updateVectorStatus();
+    }
+}
+
+async function _buildVectorIndex() {
+    if (!vectorManager.isReady) {
+        showToast('请先等待模型加载完成', 'warning');
+        return;
+    }
+
+    const chat = horaeManager.getChat();
+    if (!chat || chat.length === 0) {
+        showToast('当前没有聊天记录', 'warning');
+        return;
+    }
+
+    const progressEl = document.getElementById('horae-vector-progress');
+    const fillEl = document.getElementById('horae-vector-progress-fill');
+    const textEl = document.getElementById('horae-vector-progress-text');
+    if (progressEl) progressEl.style.display = 'block';
+    if (textEl) textEl.textContent = '构建索引中...';
+
+    try {
+        const result = await vectorManager.batchIndex(chat, ({ current, total }) => {
+            const pct = Math.round((current / total) * 100);
+            if (fillEl) fillEl.style.width = `${pct}%`;
+            if (textEl) textEl.textContent = `构建索引: ${current}/${total}`;
+        });
+
+        showToast(`索引构建完成: ${result.indexed} 条新增，${result.skipped} 条跳过`, 'success');
+    } catch (err) {
+        console.error('[Horae] 构建索引失败:', err);
+        showToast(`构建索引失败: ${err.message}`, 'error');
+    } finally {
+        if (progressEl) progressEl.style.display = 'none';
+        _updateVectorStatus();
+    }
+}
+
+async function _clearVectorIndex() {
+    if (!confirm('确定清除当前对话的所有向量索引？')) return;
+    await vectorManager.clearIndex();
+    showToast('向量索引已清除', 'success');
+    _updateVectorStatus();
 }
 
 // ============================================
@@ -8602,6 +8795,15 @@ async function onMessageReceived(messageId) {
         }
     }, 100);
 
+    if (settings.vectorEnabled && vectorManager.isReady) {
+        const meta = horaeManager.getMessageMeta(messageId);
+        if (meta) {
+            vectorManager.addMessage(messageId, meta).then(() => {
+                _updateVectorStatus();
+            }).catch(err => console.warn('[Horae] 向量索引失败:', err));
+        }
+    }
+
     // AI回复后顺序触发自动摘要（并行路径若已执行则跳过）
     if (!isRegenerate && settings.autoSummaryEnabled && settings.sendTimeline) {
         setTimeout(() => {
@@ -8650,6 +8852,14 @@ function onMessageEdited(messageId) {
     refreshAllDisplays();
     renderCustomTablesList();
     refreshVisiblePanels();
+
+    if (settings.vectorEnabled && vectorManager.isReady) {
+        const meta = horaeManager.getMessageMeta(messageId);
+        if (meta) {
+            vectorManager.addMessage(messageId, meta).catch(err =>
+                console.warn('[Horae] 向量重建失败:', err));
+        }
+    }
 }
 
 /** 注入上下文（数据+规则合并注入） */
@@ -8679,8 +8889,22 @@ async function onPromptReady(eventData) {
         }
 
         const dataPrompt = horaeManager.generateCompactPrompt(skipLast);
+
+        let recallPrompt = '';
+        console.log(`[Horae] 向量检查: vectorEnabled=${settings.vectorEnabled}, isReady=${vectorManager.isReady}, vectors=${vectorManager.vectors.size}`);
+        if (settings.vectorEnabled && vectorManager.isReady) {
+            try {
+                recallPrompt = await vectorManager.generateRecallPrompt(horaeManager, skipLast, settings);
+                console.log(`[Horae] 向量召回结果: ${recallPrompt ? recallPrompt.length + ' 字符' : '空'}`);
+            } catch (err) {
+                console.error('[Horae] 向量召回失败:', err);
+            }
+        }
+
         const rulesPrompt = horaeManager.generateSystemPromptAddition();
-        const combinedPrompt = `${dataPrompt}\n${rulesPrompt}`;
+        const combinedPrompt = recallPrompt
+            ? `${dataPrompt}\n${recallPrompt}\n${rulesPrompt}`
+            : `${dataPrompt}\n${rulesPrompt}`;
 
         const position = settings.injectionPosition;
         if (position === 0) {
@@ -8689,7 +8913,7 @@ async function onPromptReady(eventData) {
             eventData.chat.splice(-position, 0, { role: 'system', content: combinedPrompt });
         }
         
-        console.log(`[Horae] 已注入上下文，位置: -${position}${skipLast ? '（已跳过末尾消息）' : ''}`);
+        console.log(`[Horae] 已注入上下文，位置: -${position}${skipLast ? '（已跳过末尾消息）' : ''}${recallPrompt ? '（含向量召回）' : ''}`);
     } catch (error) {
         console.error('[Horae] 注入上下文失败:', error);
     }
@@ -8706,6 +8930,14 @@ async function onChatChanged() {
     
     refreshAllDisplays();
     renderCustomTablesList();
+
+    if (settings.vectorEnabled && vectorManager.isReady) {
+        const ctx = getContext();
+        const chatId = ctx?.chatId || _deriveChatId(ctx);
+        vectorManager.loadChat(chatId, horaeManager.getChat()).then(() => {
+            _updateVectorStatus();
+        }).catch(err => console.warn('[Horae] 加载向量索引失败:', err));
+    }
     
     setTimeout(() => {
         document.querySelectorAll('.mes:not(.horae-processed)').forEach(messageEl => {
@@ -8799,6 +9031,23 @@ const TUTORIAL_STEPS = [
             const body = document.getElementById('horae-autosummary-collapse-body');
             if (body && body.style.display === 'none') {
                 document.getElementById('horae-autosummary-collapse-toggle')?.click();
+            }
+        }
+    },
+    {
+        title: '向量记忆（搭配自动摘要）',
+        content: `这是给<strong>自动摘要用户</strong>准备的回忆功能。摘要压缩后旧消息的细节会丢失，向量记忆能在对话涉及历史事件时，自动从被隐藏的时间线中找回相关片段。<br><br>
+            <strong>要不要开？</strong><br>
+            · 如果你<strong>开了自动摘要</strong>且聊天楼层较高 → 建议开启<br>
+            · 如果你<strong>没开自动摘要</strong>，楼层不多、Token 充裕 → <strong>没必要开</strong>，时间线本身已经够用了<br><br>
+            <strong>关于本地模型</strong>：向量记忆使用浏览器本地运算，<strong>不消耗 API 额度</strong>。首次使用会下载一个约 30-60MB 的小模型（之后缓存在浏览器中）。<br>
+            局限：本地小模型只能做基础的内容匹配，无法像大模型那样理解复杂的言外之意。对于明确的查询（如「初次见面」「收到礼物」）效果最好。<br><br>
+            <strong>全文回顾</strong>：匹配度特别高的召回结果可以发送原始正文（思维链会自动过滤），让 AI 获得完整的叙事而非仅时间线摘要。「全文回顾条数」和「全文回顾阈值」可以自由调整，设为 0 即关闭。`,
+        target: '#horae-vector-collapse-toggle',
+        action: () => {
+            const body = document.getElementById('horae-vector-collapse-body');
+            if (body && body.style.display === 'none') {
+                document.getElementById('horae-vector-collapse-toggle')?.click();
             }
         }
     },
@@ -9026,6 +9275,10 @@ jQuery(async () => {
     }
     
     refreshAllDisplays();
+
+    if (settings.vectorEnabled) {
+        setTimeout(() => _initVectorModel(), 1000);
+    }
     
     // 新用户导航教学（仅完全没用过 Horae 的全新用户触发）
     if (_isFirstTimeUser) {

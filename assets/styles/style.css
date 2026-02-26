@@ -47,10 +47,7 @@
 .horae-message-panel select,
 .horae-modal input:not([type="checkbox"]):not([type="radio"]),
 .horae-modal textarea,
-.horae-modal select,
-.horae-tutorial-card input:not([type="checkbox"]):not([type="radio"]),
-.horae-tutorial-card textarea,
-.horae-tutorial-card select {
+.horae-modal select {
     background: var(--horae-bg) !important;
     color: var(--horae-text) !important;
     border-color: var(--horae-border) !important;
@@ -762,22 +759,26 @@
     transform: translateY(-50%);
 }
 
+.horae-summary-edit-btn,
 .horae-summary-toggle-btn,
-.horae-summary-delete-btn,
-.horae-summary-edit-btn {
-    background: transparent;
-    border: none;
+.horae-summary-delete-btn {
+    background: var(--horae-bg-secondary);
+    border: 1px solid var(--horae-border);
     cursor: pointer;
-    padding: 3px 5px;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     border-radius: var(--horae-radius-sm);
     font-size: 11px;
     opacity: 0.5;
-    transition: opacity 0.15s;
+    transition: all 0.15s ease;
 }
 
+.horae-summary-edit-btn { color: var(--horae-text-muted); }
 .horae-summary-toggle-btn { color: var(--horae-info, #2563eb); }
 .horae-summary-delete-btn { color: var(--horae-danger); }
-.horae-summary-edit-btn { color: var(--horae-accent, #f59e0b); }
 
 .horae-btn-inline-toggle {
     flex-shrink: 0;
@@ -786,10 +787,28 @@
     font-size: 12px;
 }
 
+.horae-summary-edit-btn:hover,
 .horae-summary-toggle-btn:hover,
-.horae-summary-delete-btn:hover,
-.horae-summary-edit-btn:hover {
+.horae-summary-delete-btn:hover {
     opacity: 1;
+}
+
+.horae-summary-edit-btn:hover {
+    background: var(--horae-primary);
+    color: white;
+    border-color: var(--horae-primary);
+}
+
+.horae-summary-toggle-btn:hover {
+    background: var(--horae-info, #2563eb);
+    color: white;
+    border-color: var(--horae-info, #2563eb);
+}
+
+.horae-summary-delete-btn:hover {
+    background: var(--horae-danger);
+    color: white;
+    border-color: var(--horae-danger);
 }
 
 .horae-timeline-summary-icon {
@@ -4008,469 +4027,102 @@ body .horae-context-menu {
     }
 }
 
-/* ====== 新用户导航教学 ====== */
-.horae-tutorial-card {
+/* ============================================
+   向量记忆
+   ============================================ */
+
+.horae-vector-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--horae-bg-secondary);
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--horae-text-secondary);
     margin: 8px 0;
-    border: 1px solid var(--horae-primary);
-    border-left: 3px solid var(--horae-primary);
-    border-radius: var(--horae-radius);
-    background: var(--horae-bg);
-    animation: horaeTutorialFadeIn 0.25s ease;
-    overflow: hidden;
 }
 
-@keyframes horaeTutorialFadeIn {
-    from { opacity: 0; transform: translateY(-8px); }
-    to { opacity: 1; transform: translateY(0); }
+.horae-vector-status span:first-child {
+    font-weight: 500;
 }
 
-.horae-tutorial-card-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
+.horae-vector-progress {
+    margin: 8px 0;
+}
+
+.horae-vector-progress .horae-progress-bar {
+    height: 6px;
     background: var(--horae-bg-secondary);
-    border-bottom: 1px solid var(--horae-border);
-}
-
-.horae-tutorial-card-head strong {
-    font-size: 13px;
-    color: var(--horae-text);
-}
-
-.horae-tutorial-step-indicator {
-    background: var(--horae-primary);
-    color: #fff;
-    font-size: 10px;
-    font-weight: 700;
-    padding: 1px 7px;
-    border-radius: 10px;
-    white-space: nowrap;
-    flex-shrink: 0;
-}
-
-.horae-tutorial-card-body {
-    padding: 8px 12px;
-    font-size: 12px;
-    line-height: 1.65;
-    color: var(--horae-text-muted);
-}
-
-.horae-tutorial-card-body strong {
-    color: var(--horae-text);
-}
-
-.horae-tutorial-card-body code {
-    background: rgba(124, 58, 237, 0.15);
-    padding: 0 4px;
     border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 4px;
+}
+
+.horae-vector-progress .horae-progress-fill {
+    height: 100%;
+    background: var(--horae-accent);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.horae-vector-progress span {
     font-size: 11px;
-    color: var(--horae-primary-light);
+    color: var(--horae-text-secondary);
 }
 
-.horae-tutorial-card-foot {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 12px 8px;
+.horae-vector-buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 10px;
 }
 
-.horae-tutorial-skip {
-    background: none;
-    border: none;
-    color: var(--horae-text-muted);
-    font-size: 11px;
-    cursor: pointer;
-    padding: 4px 8px;
-    border-radius: var(--horae-radius-sm);
-}
-
-.horae-tutorial-skip:hover {
-    color: var(--horae-text);
-}
-
-.horae-tutorial-next {
-    background: var(--horae-primary);
-    color: #fff;
-    border: none;
-    padding: 5px 14px;
-    border-radius: var(--horae-radius-sm);
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-}
-
-.horae-tutorial-next:hover {
-    filter: brightness(1.15);
-}
-
-.horae-tutorial-highlight {
-    outline: 2px solid var(--horae-primary);
-    outline-offset: 2px;
-    border-radius: var(--horae-radius);
-    transition: outline-color 0.3s;
-}
-
-/* 重新开始教学按钮 */
-.horae-tutorial-restart-section {
+.horae-vector-btn {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
-    padding: 10px 12px;
-    margin-top: 4px;
-    background: var(--horae-bg-secondary);
+    padding: 10px 16px;
+    border-radius: 8px;
     border: 1px solid var(--horae-border);
-    border-radius: var(--horae-radius);
+    background: var(--horae-bg-secondary);
+    color: var(--horae-text);
+    font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
-    transition: border-color 0.15s;
+    transition: all 0.2s ease;
 }
 
-.horae-tutorial-restart-section:hover {
-    border-color: var(--horae-primary);
-}
-
-.horae-tutorial-restart-section i {
-    color: var(--horae-primary-light);
+.horae-vector-btn i {
     font-size: 14px;
 }
 
-.horae-tutorial-restart-section span {
-    font-size: 12px;
-    color: var(--horae-text-muted);
-}
-
-/* === 自助美化工具 (Theme Designer) === */
-.horae-theme-designer .htd-content {
-    max-width: 480px;
-    width: 95vw;
-    max-height: 90vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    border-radius: var(--horae-radius);
-    background: var(--horae-bg);
-    border: 1px solid var(--horae-border);
-}
-
-.htd-header {
-    padding: 12px 16px;
-    font-size: 15px;
-    font-weight: 600;
+.horae-vector-btn.build {
     background: linear-gradient(135deg, var(--horae-primary-dark), var(--horae-primary));
-    color: #fff;
-    border-radius: var(--horae-radius) var(--horae-radius) 0 0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
+    border-color: var(--horae-primary);
+    color: white;
 }
 
-.htd-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px;
+.horae-vector-btn.build:hover {
+    box-shadow: 0 4px 12px rgba(124, 58, 237, 0.35);
+    transform: translateY(-1px);
 }
 
-.htd-section {
-    margin-bottom: 12px;
-    background: var(--horae-bg-secondary);
-    border-radius: var(--horae-radius);
-    padding: 12px;
+.horae-vector-btn.clear {
+    border-color: rgba(239, 68, 68, 0.3);
 }
 
-.htd-section-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--horae-primary-light);
-    margin-bottom: 10px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
+.horae-vector-btn.clear i {
+    color: var(--horae-danger);
 }
 
-.htd-toggle {
-    cursor: pointer;
-    user-select: none;
+.horae-vector-btn.clear:hover {
+    background: rgba(239, 68, 68, 0.12);
+    border-color: var(--horae-danger);
 }
 
-.htd-toggle:hover {
-    color: var(--horae-text);
-}
-
-.htd-toggle .htd-arrow {
-    margin-left: auto;
-    font-size: 10px;
-    transition: transform 0.2s;
-    color: var(--horae-text-muted);
-}
-
-.htd-field {
-    margin-bottom: 10px;
-}
-
-.htd-field:last-child {
-    margin-bottom: 0;
-}
-
-.htd-label {
-    font-size: 12px;
-    color: var(--horae-text-muted);
-    display: block;
-    margin-bottom: 4px;
-}
-
-.htd-label em {
-    color: var(--horae-primary-light);
-    font-style: normal;
-    font-weight: 600;
-}
-
-/* Hue bar */
-.htd-hue-bar {
-    width: 100%;
-    height: 26px;
-    border-radius: 13px;
-    background: linear-gradient(to right,
-        hsl(0,100%,50%), hsl(30,100%,50%), hsl(60,100%,50%), hsl(90,100%,50%),
-        hsl(120,100%,50%), hsl(150,100%,50%), hsl(180,100%,50%), hsl(210,100%,50%),
-        hsl(240,100%,50%), hsl(270,100%,50%), hsl(300,100%,50%), hsl(330,100%,50%),
-        hsl(360,100%,50%));
-    cursor: crosshair;
-    position: relative;
-    border: 2px solid var(--horae-border);
-    touch-action: none;
-}
-
-.htd-hue-ind {
-    position: absolute;
-    top: -3px;
-    width: 10px;
-    height: 32px;
-    border: 2px solid #fff;
-    border-radius: 5px;
-    transform: translateX(-50%);
-    pointer-events: none;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.4), inset 0 0 0 1px rgba(0,0,0,0.2);
-}
-
-/* Sliders */
-.htd-slider {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 100%;
-    height: 8px;
-    border-radius: 4px;
-    background: var(--horae-bg-hover) !important;
-    outline: none;
-    cursor: pointer;
-    border: none !important;
-}
-
-.htd-slider::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: var(--horae-primary);
-    border: 2px solid #fff;
-    cursor: pointer;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-}
-
-.htd-slider::-moz-range-thumb {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: var(--horae-primary);
-    border: 2px solid #fff;
-    cursor: pointer;
-}
-
-.htd-colorlight {
-    background: linear-gradient(to right, #1a1a2e, var(--horae-primary, #7c3aed), #e8d8ff) !important;
-}
-
-.htd-daynight {
-    background: linear-gradient(to right, #0c0c18 0%, #1a1a2e 30%, #e8e8ec 70%, #fafafa 100%) !important;
-}
-
-/* Color picker row */
-.htd-color-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.htd-cpick {
-    width: 36px;
-    height: 28px;
-    border: 2px solid var(--horae-border);
-    border-radius: var(--horae-radius-sm);
-    cursor: pointer;
-    padding: 0;
-    background: transparent;
-}
-
-.htd-hex {
-    font-size: 12px;
-    color: var(--horae-text-muted);
-    font-family: monospace;
-}
-
-/* Swatches */
-.htd-swatches {
-    display: flex;
-    gap: 4px;
-    flex-wrap: wrap;
-    margin-top: 10px;
-    padding-top: 8px;
-    border-top: 1px solid var(--horae-border);
-}
-
-.htd-swatch {
-    width: 26px;
-    height: 26px;
-    border-radius: 5px;
-    border: 2px solid rgba(128,128,128,0.25);
-    cursor: help;
-    transition: transform 0.1s;
-}
-
-.htd-swatch:hover {
-    transform: scale(1.2);
-    z-index: 1;
-}
-
-/* Fine tuning */
-.htd-fine-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 3px 0;
-    font-size: 12px;
-    color: var(--horae-text);
-}
-
-.htd-fine-row > span:first-child {
-    flex: 1;
-    min-width: 55px;
-    font-size: 11px;
-}
-
-.htd-fine-cpick {
-    width: 30px;
-    height: 22px;
-    border: 1px solid var(--horae-border);
-    border-radius: 3px;
-    padding: 0;
-    cursor: pointer;
-    background: transparent;
-    flex-shrink: 0;
-}
-
-.htd-fine-hex {
-    font-size: 11px;
-    font-family: monospace;
-    color: var(--horae-text-muted);
-    min-width: 62px;
-}
-
-/* Image inputs */
-.htd-img-group {
-    padding: 8px 0;
-    border-bottom: 1px solid var(--horae-border);
-}
-
-.htd-img-group:last-child {
-    border-bottom: none;
-}
-
-.htd-img-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--horae-text);
-    margin-bottom: 4px;
-}
-
-.htd-img-ctrl {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 11px;
-    color: var(--horae-text-muted);
-    margin-top: 6px;
-}
-
-.htd-img-ctrl em {
-    color: var(--horae-primary-light);
-    font-style: normal;
-}
-
-.htd-img-ctrl .htd-slider {
-    flex: 1;
-}
-
-.htd-img-preview {
-    max-width: 100%;
-    max-height: 60px;
-    border-radius: var(--horae-radius-sm);
-    margin-top: 6px;
-    border: 1px solid var(--horae-border);
-    object-fit: cover;
-}
-
-/* Inputs */
-.htd-input {
-    width: 100%;
-    padding: 6px 8px;
-    font-size: 12px;
-    background: var(--horae-bg) !important;
-    color: var(--horae-text) !important;
-    border: 1px solid var(--horae-border) !important;
-    border-radius: var(--horae-radius-sm);
-    box-sizing: border-box;
-}
-
-.htd-input:focus {
-    border-color: var(--horae-primary) !important;
-    outline: none;
-}
-
-/* Save section */
-.htd-save-sec {
-    background: transparent;
-    padding: 0;
-}
-
-.htd-btn-row {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin-top: 10px;
-}
-
-.htd-btn-row .horae-btn {
-    flex: 1;
-    min-width: 70px;
-    font-size: 12px;
-    padding: 6px 10px;
-}
-
-/* Mobile adjustments */
-@media (max-width: 600px) {
-    .horae-theme-designer .htd-content {
-        max-width: 100vw;
-        max-height: 95vh;
-        border-radius: 0;
-    }
-    .htd-swatch {
-        width: 22px;
-        height: 22px;
-    }
-    .htd-btn-row .horae-btn {
-        min-width: 60px;
-        font-size: 11px;
-        padding: 5px 8px;
-    }
+.horae-vector-btn:active {
+    transform: translateY(0);
 }
 
