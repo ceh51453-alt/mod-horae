@@ -5119,3 +5119,86 @@ body .horae-context-menu {
 @media screen and (max-width: 768px) {
     .horae-rpg-dice-body { width: 220px; }
 }
+
+/* ========== 平板适配（769px ~ 1024px） ========== */
+@media screen and (min-width: 769px) and (max-width: 1024px) {
+    /* 标签页 */
+    .horae-tab { min-width: 0; padding: 8px 6px; font-size: 11px; gap: 4px; }
+    .horae-tab i { font-size: 13px; }
+    .horae-tab span { font-size: 10px; }
+
+    /* 设置区稍微收紧 */
+    .horae-setting-item { margin-bottom: 8px; }
+    .horae-setting-sub-hint { font-size: 10px; }
+
+    /* 编辑字段行 */
+    .horae-edit-field-row { grid-template-columns: 1fr 1fr 1fr; }
+
+    /* 数据按钮网格 */
+    .horae-data-btn { padding: 14px 8px; min-height: 60px; }
+    .horae-data-btn i { font-size: 20px; }
+    .horae-data-btn span { font-size: 12px; }
+
+    /* 弹窗 */
+    .horae-modal { padding: 12px; box-sizing: border-box; }
+    .horae-modal-content {
+        width: 100% !important;
+        max-width: 92vw !important;
+        max-height: 82vh;
+        margin: auto;
+        box-sizing: border-box;
+    }
+    .horae-modal-body {
+        max-height: 60vh;
+        overflow-y: auto;
+    }
+    .horae-review-modal .horae-modal-content {
+        max-width: 92vw !important;
+        width: 92vw !important;
+        max-height: 85vh;
+    }
+    /* 触屏输入缩放修复 */
+    .horae-modal input,
+    .horae-modal textarea,
+    .horae-modal select { font-size: 16px; }
+    .horae-modal-footer { flex-wrap: wrap; gap: 6px; }
+    .horae-modal-footer .horae-btn { flex: 1 1 calc(50% - 3px); min-width: calc(50% - 3px); }
+
+    /* 进度弹窗 */
+    .horae-progress-container { max-width: 88vw; min-width: auto; }
+
+    /* RPG HUD */
+    .horae-rpg-hud { padding: 4px 8px; }
+    .horae-rpg-hud-name { font-size: 10px; min-width: 60px; }
+    .horae-rpg-hud-lbl { font-size: 8px; }
+    .horae-rpg-hud-val { font-size: 8px; }
+
+    /* 时间线 */
+    .horae-timeline-item { flex-wrap: wrap; row-gap: 4px; }
+    .horae-timeline-summary { font-size: 12px; }
+    .horae-timeline-meta { font-size: 10px; }
+
+    /* 物品编辑器适配 */
+    .horae-item-row { flex-wrap: wrap; gap: 6px; }
+    .horae-item-row .item-icon { max-width: 36px; min-width: 36px; order: 1; }
+    .horae-item-row .item-name { flex: 1; min-width: calc(100% - 80px); order: 2; }
+    .horae-item-row .delete-btn { order: 3; }
+    .horae-item-row .item-holder { flex: 1; min-width: 45%; order: 4; }
+    .horae-item-row .item-location { flex: 1; min-width: 45%; order: 5; }
+    .horae-item-row .item-importance { width: 60px; min-width: 60px; order: 6; }
+    .horae-item-desc-row { padding-left: 0; margin-left: 0; }
+
+    /* 服装编辑器适配 */
+    .horae-costume-editor .horae-editor-row { flex-wrap: wrap; }
+    .horae-costume-editor .horae-editor-row .char-input { max-width: 80px; flex: 0 0 80px; }
+    .horae-costume-editor .horae-editor-row input:not(.char-input) { flex: 1; min-width: calc(100% - 120px); }
+
+    /* 面板内容可滚动 */
+    .horae-panel-content { max-height: 60vh; overflow-y: auto; }
+
+    /* 物品/NPC/关系/待办行操作按钮常显（触屏无 hover） */
+    .horae-rel-actions,
+    .horae-loc-actions,
+    .horae-agenda-delete,
+    .horae-item-lock-btn { opacity: 1; }
+}

@@ -3,7 +3,7 @@
  * 基于时间锚点的AI记忆增强系统
  * 
  * 作者: SenriYuki
- * 版本: 1.9.2
+ * 版本: 1.9.3
  */
 
 import { renderExtensionTemplateAsync, getContext, extension_settings } from '/scripts/extensions.js';
@@ -20,7 +20,7 @@ import { calculateRelativeTime, calculateDetailedRelativeTime, formatRelativeTim
 const EXTENSION_NAME = 'horae';
 const EXTENSION_FOLDER = `third-party/SillyTavern-Horae`;
 const TEMPLATE_PATH = `${EXTENSION_FOLDER}/assets/templates`;
-const VERSION = '1.9.2';
+const VERSION = '1.9.3';
 
 // 配套正则规则（自动注入ST原生正则系统）
 const HORAE_REGEX_RULES = [
@@ -4606,11 +4606,12 @@ function getRpgBarColor(key) {
     return cfg?.color || '#6366f1';
 }
 
-/** 根据配置获取属性条显示名 */
+/** 根据配置获取属性条显示名（用户自定义名 > AI标签 > 默认key大写） */
 function getRpgBarName(key, aiLabel) {
-    if (aiLabel) return aiLabel;
     const cfg = (settings.rpgBarConfig || []).find(b => b.key === key);
-    return cfg?.name || key.toUpperCase();
+    const cfgName = cfg?.name;
+    if (cfgName && cfgName !== key.toUpperCase()) return cfgName;
+    return aiLabel || cfgName || key.toUpperCase();
 }
 
 // ============================================
@@ -5306,17 +5307,18 @@ function _renderRpgHudFromSnapshot(messageEl, messageIndex, rpg) {
     for (const name of chars) {
         const bars = rpg.bars[name] || {};
         const effects = rpg.status?.[name] || [];
-        const displayName = name;
-        html += `<div class="horae-rpg-hud-name">${escapeHtml(displayName)}`;
+        html += '<div class="horae-rpg-hud-row">';
+        html += `<div class="horae-rpg-hud-name">${escapeHtml(name)}`;
         for (const e of effects) html += ` <i class="fa-solid ${getStatusIcon(e)} horae-rpg-hud-effect" title="${escapeHtml(e)}"></i>`;
-        html += '</div>';
+        html += '</div><div class="horae-rpg-hud-bars">';
         for (const [type, val] of Object.entries(bars)) {
             const label = getRpgBarName(type, val[2]);
             const cur = val[0], max = val[1];
             const pct = max > 0 ? Math.min(100, Math.round(cur / max * 100)) : 0;
             const color = getRpgBarColor(type);
-            html += `<div class="horae-rpg-hud-bar"><span class="horae-rpg-hud-label">${escapeHtml(label)}</span><div class="horae-rpg-hud-track"><div class="horae-rpg-hud-fill" style="width:${pct}%;background:${color};"></div></div><span class="horae-rpg-hud-val">${cur}/${max}</span></div>`;
+            html += `<div class="horae-rpg-hud-bar"><span class="horae-rpg-hud-lbl">${escapeHtml(label)}</span><div class="horae-rpg-hud-track"><div class="horae-rpg-hud-fill" style="width:${pct}%;background:${color};"></div></div><span class="horae-rpg-hud-val">${cur}/${max}</span></div>`;
         }
+        html += '</div></div>';
     }
     html += '</div>';
 
