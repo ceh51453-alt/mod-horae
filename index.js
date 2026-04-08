@@ -9223,7 +9223,16 @@ function bindPanelEvents(panelEl) {
  */
 function bindDeleteButtons(container) {
     container.querySelectorAll('.horae-delete-btn').forEach(btn => {
-        btn.onclick = () => btn.closest('.horae-editor-row')?.remove();
+        btn.onclick = () => {
+            const row = btn.closest('.horae-editor-row');
+            if (row?.classList.contains('horae-item-row')) {
+                const descRow = row.nextElementSibling;
+                if (descRow?.classList.contains('horae-item-desc-row')) {
+                    descRow.remove();
+                }
+            }
+            row?.remove();
+        };
     });
 }
 

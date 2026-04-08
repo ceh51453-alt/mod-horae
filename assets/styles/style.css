@@ -4319,7 +4319,8 @@ body .horae-context-menu {
 .horae-rpg-eq-slot-del,
 .horae-rpg-cur-del,
 .horae-rpg-rep-del,
-.horae-rpg-eq-item-del {
+.horae-rpg-eq-item-del,
+.horae-rpg-rep-subitem-del {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -4336,7 +4337,8 @@ body .horae-context-menu {
 .horae-rpg-eq-slot-del:hover,
 .horae-rpg-cur-del:hover,
 .horae-rpg-rep-del:hover,
-.horae-rpg-eq-item-del:hover {
+.horae-rpg-eq-item-del:hover,
+.horae-rpg-rep-subitem-del:hover {
     background: rgba(239, 68, 68, 0.15);
     border-color: #ef4444;
     color: #ef4444;
