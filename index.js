@@ -3,7 +3,7 @@
  * 基于时间锚点的AI记忆增强系统
  * 
  * 作者: SenriYuki
- * 版本: 1.11.10
+ * 版本: 1.11.11
  */
 
 import { renderExtensionTemplateAsync, getContext, extension_settings } from '/scripts/extensions.js';
@@ -21,7 +21,7 @@ import { t, initI18n, getLanguage, isZhLocale, setLanguage, detectEffectiveAiLan
 const EXTENSION_NAME = 'horae';
 const EXTENSION_FOLDER = `third-party/SillyTavern-Horae`;
 const TEMPLATE_PATH = `${EXTENSION_FOLDER}/assets/templates`;
-const VERSION = '1.11.10';
+const VERSION = '1.11.11';
 
 // 配套正则规则（自动注入ST原生正则系统）
 const HORAE_REGEX_RULES = [
@@ -558,10 +558,10 @@ function setChatTables(tables) {
 function getGlobalTables() {
     const templates = settings.globalTables || [];
     const chat = horaeManager.getChat();
-    if (!chat?.[0]) return templates.map(t => ({ ...t }));
+    if (!chat?.[0]) return templates.map(tbl => ({ ...tbl }));
 
     const firstMsg = chat[0];
-    if (!firstMsg.horae_meta) return templates.map(t => ({ ...t }));
+    if (!firstMsg.horae_meta) return templates.map(tbl => ({ ...tbl }));
     if (!firstMsg.horae_meta.globalTableData) firstMsg.horae_meta.globalTableData = {};
     const perCardData = firstMsg.horae_meta.globalTableData;
 
@@ -611,7 +611,7 @@ function setGlobalTables(tables) {
         const perCardData = chat[0].horae_meta.globalTableData;
 
         // 清除已被删除的表格的 per-card 数据
-        const currentNames = new Set(tables.map(t => (t.name || '').trim()).filter(Boolean));
+        const currentNames = new Set(tables.map(tbl => (tbl.name || '').trim()).filter(Boolean));
         for (const key of Object.keys(perCardData)) {
             if (!currentNames.has(key)) delete perCardData[key];
         }
@@ -682,7 +682,7 @@ function getCharacterTables() {
 
     const templates = charData.extensions.horae.charTables;
     const chat = horaeManager.getChat();
-    if (!chat?.[0]?.horae_meta) return templates.map(t => ({ ...t, data: _headerOnly(t), baseData: {}, baseRows: t.rows || 2, baseCols: t.cols || 2 }));
+    if (!chat?.[0]?.horae_meta) return templates.map(tbl => ({ ...tbl, data: _headerOnly(tbl), baseData: {}, baseRows: tbl.rows || 2, baseCols: tbl.cols || 2 }));
 
     if (!chat[0].horae_meta.charTableData) chat[0].horae_meta.charTableData = {};
     const perChatData = chat[0].horae_meta.charTableData;
@@ -744,7 +744,7 @@ function setCharacterTables(tables) {
         if (!chat[0].horae_meta.charTableData) chat[0].horae_meta.charTableData = {};
         const perChatData = chat[0].horae_meta.charTableData;
 
-        const currentNames = new Set(tables.map(t => (t.name || '').trim()).filter(Boolean));
+        const currentNames = new Set(tables.map(tbl => (tbl.name || '').trim()).filter(Boolean));
         for (const key of Object.keys(perChatData)) {
             if (!currentNames.has(key)) delete perChatData[key];
         }
@@ -2172,7 +2172,7 @@ async function compressSelectedTimelineEvents() {
         cancelResolve();
         overlay.remove();
         window.fetch = _origFetch;
-        showToast(t('toast.saveSuccess'), 'info');
+        showToast(t('toast.scanCancelled'), 'info');
     });
     
     try {
@@ -2210,6 +2210,7 @@ async function compressSelectedTimelineEvents() {
         }
         
         let summaryText = response.trim()
+            .replace(/<think(?:ing)?[\s>][\s\S]*?<\/think(?:ing)?>/gi, '')
             .replace(/<horae>[\s\S]*?<\/horae>/gi, '')
             .replace(/<horaeevent>[\s\S]*?<\/horaeevent>/gi, '')
             .replace(/<!--horae[\s\S]*?-->/gi, '')
@@ -4057,16 +4058,16 @@ function renderCustomTablesList() {
     let html = '';
     if (globalTables.length > 0) {
         html += `<div class="horae-tables-group-label"><i class="fa-solid fa-globe"></i> ${t('ui.globalTables')}</div>`;
-        html += globalTables.map((t, i) => renderOneTable(t, i, 'global')).join('');
+        html += globalTables.map((tbl, i) => renderOneTable(tbl, i, 'global')).join('');
     }
     if (charTables.length > 0) {
         const charName = getContext()?.name2 || '';
         html += `<div class="horae-tables-group-label"><i class="fa-solid fa-id-card"></i> ${t('ui.characterTables')}${charName ? ` (${charName})` : ''}</div>`;
-        html += charTables.map((t, i) => renderOneTable(t, i, 'character')).join('');
+        html += charTables.map((tbl, i) => renderOneTable(tbl, i, 'character')).join('');
     }
     if (chatTables.length > 0) {
         html += `<div class="horae-tables-group-label"><i class="fa-solid fa-bookmark"></i> ${t('ui.localTables')}</div>`;
-        html += chatTables.map((t, i) => renderOneTable(t, i, 'local')).join('');
+        html += chatTables.map((tbl, i) => renderOneTable(tbl, i, 'local')).join('');
     }
     listEl.innerHTML = html;
 
@@ -4629,7 +4630,7 @@ function purgeTableContributions(tableName, scope = 'local') {
     // 将当前完整数据（含用户编辑）写入 baseData 作为新基准
     // 这样即使消息被滑动/重新生成，rebuildTableData 也能从正确的基准恢复
     const tables = getTablesByScope(scope);
-    const table = tables.find(t => (t.name || '').trim() === tableName);
+    const table = tables.find(tbl => (tbl.name || '').trim() === tableName);
     if (table) {
         table.baseData = JSON.parse(JSON.stringify(table.data || {}));
         table.baseRows = table.rows;
@@ -6492,10 +6493,10 @@ function _bindEquipmentEvents() {
         if (!tpls.length) { showToast(t('toast.noTemplates'), 'warning'); return; }
         const modal = document.createElement('div');
         modal.className = 'horae-modal';
-        let listHtml = tpls.map((t, i) => {
-            const slotsStr = t.slots.map(s => s.name).join('、');
+        let listHtml = tpls.map((tpl, i) => {
+            const slotsStr = tpl.slots.map(s => s.name).join('、');
             return `<div class="horae-rpg-tpl-item" data-idx="${i}" style="cursor:pointer;">
-                <div class="horae-rpg-tpl-name">${escapeHtml(t.name)}</div>
+                <div class="horae-rpg-tpl-name">${escapeHtml(tpl.name)}</div>
                 <div class="horae-rpg-tpl-slots">${escapeHtml(slotsStr)}</div>
             </div>`;
         }).join('');
@@ -6693,9 +6694,9 @@ function _openEquipTemplateManageModal() {
     modal.className = 'horae-modal';
     function _render() {
         const tpls = settings.equipmentTemplates || [];
-        let listHtml = tpls.map((t, i) => {
-            const slotsStr = t.slots.map(s => s.name).join('、');
-            return `<div class="horae-rpg-tpl-item"><div class="horae-rpg-tpl-name">${escapeHtml(t.name)}</div>
+        let listHtml = tpls.map((tpl, i) => {
+            const slotsStr = tpl.slots.map(s => s.name).join('、');
+            return `<div class="horae-rpg-tpl-item"><div class="horae-rpg-tpl-name">${escapeHtml(tpl.name)}</div>
                 <div class="horae-rpg-tpl-slots">${escapeHtml(slotsStr)}</div>
                 <button class="horae-rpg-btn-sm horae-rpg-tpl-del" data-idx="${i}" title="${t('common.delete')}"><i class="fa-solid fa-trash"></i></button>
             </div>`;
@@ -7495,8 +7496,15 @@ function _saveGlobalMeta(meta) {
 function _restoreGlobalMeta(meta, saved) {
     if (!saved || !meta) return;
     for (const key of _GLOBAL_META_KEYS) {
-        if (saved[key] !== undefined && meta[key] === undefined) {
+        if (saved[key] === undefined) continue;
+        if (meta[key] === undefined) {
             meta[key] = saved[key];
+        } else if (key === 'rpg' && typeof saved[key] === 'object' && typeof meta[key] === 'object') {
+            for (const rk of Object.keys(saved[key])) {
+                if (meta[key][rk] === undefined) {
+                    meta[key][rk] = saved[key][rk];
+                }
+            }
         }
     }
 }
@@ -8316,18 +8324,18 @@ function refreshThemeSelector() {
     // 清除动态选项（内置预设 + 用户导入）
     sel.querySelectorAll('option:not([value="dark"]):not([value="light"])').forEach(o => o.remove());
     // 内置预设主题
-    for (const [key, t] of Object.entries(BUILTIN_THEMES)) {
+    for (const [key, theme] of Object.entries(BUILTIN_THEMES)) {
         const opt = document.createElement('option');
         opt.value = key;
-        opt.textContent = `🎨 ${t.name}`;
+        opt.textContent = `🎨 ${theme.name}`;
         sel.appendChild(opt);
     }
     // 用户导入的主题
     const themes = settings.customThemes || [];
-    themes.forEach((t, i) => {
+    themes.forEach((theme, i) => {
         const opt = document.createElement('option');
         opt.value = `custom-${i}`;
-        opt.textContent = `📁 ${t.name}`;
+        opt.textContent = `📁 ${theme.name}`;
         sel.appendChild(opt);
     });
     sel.value = settings.themeMode || 'dark';
@@ -8770,8 +8778,8 @@ function openThemeDesigner() {
     hueBar.addEventListener('touchstart', e => { hueDrag = true; onHue(e); }, { signal: sig, passive: true });
     document.addEventListener('mousemove', e => { if (hueDrag) onHue(e); }, { signal: sig });
     document.addEventListener('touchmove', e => { if (hueDrag) onHue(e); }, { signal: sig, passive: true });
-    document.addEventListener('mouseup', () => hueDrag = false, { signal: sig });
-    document.addEventListener('touchend', () => hueDrag = false, { signal: sig });
+    document.addEventListener('mouseup', () => hueDrag = false, { signal: sig, capture: true });
+    document.addEventListener('touchend', () => hueDrag = false, { signal: sig, capture: true });
 
     // ---- Sliders ----
     modal.querySelector('#htd-sat').addEventListener('input', function () {
@@ -13093,8 +13101,8 @@ async function checkAutoSummary() {
         const fullTexts = msgIndices.map(idx => {
             const msg = chat[idx];
             const d = msg?.horae_meta?.timestamp?.story_date || '';
-            const t = msg?.horae_meta?.timestamp?.story_time || '';
-            return `【#${idx}${d ? ' ' + d : ''}${t ? ' ' + t : ''}】\n${_stripConfiguredTags(msg?.mes || '')}`;
+            const tm = msg?.horae_meta?.timestamp?.story_time || '';
+            return `【#${idx}${d ? ' ' + d : ''}${tm ? ' ' + tm : ''}】\n${_stripConfiguredTags(msg?.mes || '')}`;
         });
         const sourceText = fullTexts.join('\n\n');
         
@@ -13112,8 +13120,9 @@ async function checkAutoSummary() {
             return;
         }
         
-        // 清洗 AI 回复中的 horae 标签，只保留纯文本摘要
+        // 清洗 AI 回复中的 think/horae 标签，只保留纯文本摘要
         let summaryText = response.trim()
+            .replace(/<think(?:ing)?[\s>][\s\S]*?<\/think(?:ing)?>/gi, '')
             .replace(/<horae>[\s\S]*?<\/horae>/gi, '')
             .replace(/<horaeevent>[\s\S]*?<\/horaeevent>/gi, '')
             .replace(/<!--horae[\s\S]*?-->/gi, '')
@@ -13477,7 +13486,7 @@ function _stripConfiguredTags(text) {
     if (!text) return text;
     const tagList = settings.vectorStripTags;
     if (!tagList) return text;
-    const tags = tagList.split(/[,，\s]+/).map(t => t.trim()).filter(Boolean);
+    const tags = tagList.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean);
     for (const tag of tags) {
         const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         text = text.replace(new RegExp(`<${escaped}(?:\\s[^>]*)?>[\\s\\S]*?</${escaped}>`, 'gi'), '');
@@ -13943,7 +13952,7 @@ function showScanReviewModal(scanResults, scanOptions) {
     // tab 切换
     modal.querySelectorAll('.horae-review-tab').forEach(tabBtn => {
         tabBtn.addEventListener('click', () => {
-            modal.querySelectorAll('.horae-review-tab').forEach(t => t.classList.remove('active'));
+            modal.querySelectorAll('.horae-review-tab').forEach(el => el.classList.remove('active'));
             modal.querySelectorAll('.horae-review-panel').forEach(p => p.classList.remove('active'));
             tabBtn.classList.add('active');
             modal.querySelector(`.horae-review-panel[data-panel="${tabBtn.dataset.tab}"]`)?.classList.add('active');
@@ -14400,7 +14409,22 @@ function _importAsInitialState(importObj, chat) {
             if (meta.rpg.equipmentConfig) target.rpg.equipmentConfig = JSON.parse(JSON.stringify(meta.rpg.equipmentConfig));
             if (meta.rpg.currencyConfig) target.rpg.currencyConfig = JSON.parse(JSON.stringify(meta.rpg.currencyConfig));
             if (meta.rpg.strongholds?.length) target.rpg.strongholds = JSON.parse(JSON.stringify(meta.rpg.strongholds));
-            if (meta.rpg._deletedSkills?.length) target.rpg._deletedSkills = [...meta.rpg._deletedSkills];
+            if (meta.rpg._deletedSkills?.length) {
+                if (!target.rpg._deletedSkills) target.rpg._deletedSkills = [];
+                for (const d of meta.rpg._deletedSkills) {
+                    if (!target.rpg._deletedSkills.some(e => e.owner === d.owner && e.name === d.name)) {
+                        target.rpg._deletedSkills.push({ ...d });
+                    }
+                }
+            }
+            if (meta.rpg._deletedStrongholds?.length) {
+                if (!target.rpg._deletedStrongholds) target.rpg._deletedStrongholds = [];
+                for (const d of meta.rpg._deletedStrongholds) {
+                    if (!target.rpg._deletedStrongholds.some(e => e.name === d.name && e.parent === d.parent)) {
+                        target.rpg._deletedStrongholds.push({ ...d });
+                    }
+                }
+            }
         }
     }
     

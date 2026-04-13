@@ -1627,7 +1627,22 @@ class HoraeManager {
         }
         
         if (parsed.rpg) {
-            meta._rpgChanges = parsed.rpg;
+            const r = parsed.rpg;
+            const hasContent = Object.keys(r.bars || {}).length > 0
+                || Object.keys(r.status || {}).length > 0
+                || (r.skills || []).length > 0
+                || (r.removedSkills || []).length > 0
+                || Object.keys(r.attributes || {}).length > 0
+                || Object.keys(r.reputation || {}).length > 0
+                || (r.equipment || []).length > 0
+                || (r.unequip || []).length > 0
+                || Object.keys(r.levels || {}).length > 0
+                || Object.keys(r.xp || {}).length > 0
+                || (r.currency || []).length > 0
+                || (r.baseChanges || []).length > 0;
+            if (hasContent) {
+                meta._rpgChanges = parsed.rpg;
+            }
         }
         
         return meta;
@@ -1899,8 +1914,10 @@ class HoraeManager {
         return ownerStr.trim();
     }
 
-    /** 合并 RPG 变更到 chat[0].horae_meta.rpg */
-    _mergeRpgData(changes) {
+    /** 合并 RPG 变更到 chat[0].horae_meta.rpg
+     *  @param {boolean} [readOnly=false] rebuild 路径设为 true，跳过物品转移等破坏性操作
+     */
+    _mergeRpgData(changes, readOnly = false) {
         const chat = this.getChat();
         if (!chat?.length || !changes) return;
         const first = chat[0];
@@ -1908,7 +1925,7 @@ class HoraeManager {
         if (!first.horae_meta.rpg) first.horae_meta.rpg = { bars: {}, status: {}, skills: {} };
         const rpg = first.horae_meta.rpg;
 
-        const _mUN = this.context?.name1 || '';
+        const _mUN = this.context?.name1 || '主角';
 
         for (const [raw, barData] of Object.entries(changes.bars || {})) {
             const owner = this._resolveRpgOwner(raw);
@@ -1922,14 +1939,16 @@ class HoraeManager {
             if (!rpg.status) rpg.status = {};
             rpg.status[owner] = effects;
         }
+        const _deletedSkillSet = new Set((rpg._deletedSkills || []).map(d => `${d.owner}\0${d.name}`));
         for (const sk of (changes.skills || [])) {
             const owner = this._resolveRpgOwner(sk.owner);
             if (this.settings?.rpgSkillsUserOnly && owner !== _mUN) continue;
+            if (_deletedSkillSet.has(`${owner}\0${sk.name}`)) continue;
             if (!rpg.skills[owner]) rpg.skills[owner] = [];
             const idx = rpg.skills[owner].findIndex(s => s.name === sk.name);
             if (idx >= 0) {
-                if (sk.level) rpg.skills[owner][idx].level = sk.level;
-                if (sk.desc) rpg.skills[owner][idx].desc = sk.desc;
+                if (sk.level != null) rpg.skills[owner][idx].level = sk.level;
+                if (sk.desc != null) rpg.skills[owner][idx].desc = sk.desc;
             } else {
                 rpg.skills[owner].push({ name: sk.name, level: sk.level, desc: sk.desc });
             }
@@ -1963,6 +1982,7 @@ class HoraeManager {
                 };
             };
             const _findAndTakeItem = (name) => {
+                if (readOnly) return null;
                 const state = this.getLatestState();
                 const itemInfo = state?.items?.[name];
                 if (!itemInfo) return null;
@@ -1973,6 +1993,7 @@ class HoraeManager {
                 return meta;
             };
             const _returnItemFromEquip = (entry, owner) => {
+                if (readOnly) return;
                 if (!first.horae_meta.items) first.horae_meta.items = {};
                 const m = entry._itemMeta || {};
                 first.horae_meta.items[entry.name] = {
@@ -2012,7 +2033,7 @@ class HoraeManager {
                 }
             }
         }
-        // 声望：只接受 reputationConfig 中已定义且未删除的分类
+        // 声望：只接受 reputationConfig 中已定义且未删除的分类（配置为空时不限制）
         if (changes.reputation && Object.keys(changes.reputation).length > 0) {
             if (!rpg.reputationConfig) rpg.reputationConfig = { categories: [], _deletedCategories: [] };
             if (!rpg.reputation) rpg.reputation = {};
@@ -2023,7 +2044,8 @@ class HoraeManager {
                 if (this.settings?.rpgReputationUserOnly && owner !== _mUN) continue;
                 if (!rpg.reputation[owner]) rpg.reputation[owner] = {};
                 for (const [catName, val] of Object.entries(cats)) {
-                    if (!validNames.has(catName) || deleted.has(catName)) continue;
+                    if (deleted.has(catName)) continue;
+                    if (validNames.size > 0 && !validNames.has(catName)) continue;
                     const cfg = rpg.reputationConfig.categories.find(c => c.name === catName);
                     const clamped = Math.max(cfg?.min ?? -100, Math.min(cfg?.max ?? 100, val));
                     if (!rpg.reputation[owner][catName]) {
@@ -2048,7 +2070,7 @@ class HoraeManager {
             if (!rpg.xp) rpg.xp = {};
             rpg.xp[owner] = val;
         }
-        // 货币：只接受 currencyConfig 中已定义的币种
+        // 货币：只接受 currencyConfig 中已定义的币种（配置为空时不限制）
         if (changes.currency?.length > 0) {
             if (!rpg.currencyConfig) rpg.currencyConfig = { denominations: [] };
             if (!rpg.currency) rpg.currency = {};
@@ -2056,7 +2078,7 @@ class HoraeManager {
             for (const c of changes.currency) {
                 const owner = this._resolveRpgOwner(c.owner);
                 if (this.settings?.rpgCurrencyUserOnly && owner !== _mUN) continue;
-                if (!validDenoms.has(c.name)) continue;
+                if (validDenoms.size > 0 && !validDenoms.has(c.name)) continue;
                 if (!rpg.currency[owner]) rpg.currency[owner] = {};
                 if (c.isDelta) {
                     rpg.currency[owner][c.name] = (rpg.currency[owner][c.name] || 0) + c.value;
@@ -2129,9 +2151,9 @@ class HoraeManager {
             currencyConfig: oldCurrencyConfig, currency: {},
             strongholds: oldStrongholds, _deletedStrongholds: deletedStrongholds,
         };
-        for (let i = 1; i < chat.length; i++) {
+        for (let i = 0; i < chat.length; i++) {
             const changes = chat[i]?.horae_meta?._rpgChanges;
-            if (changes) this._mergeRpgData(changes);
+            if (changes) this._mergeRpgData(changes, true);
         }
         // 回填用户手动添加的技能
         const rpg = first.horae_meta.rpg;
@@ -2148,13 +2170,14 @@ class HoraeManager {
                 if (!rpg.skills[del.owner].length) delete rpg.skills[del.owner];
             }
         }
-        // 回填用户设置的声望（_userEdited 的主数值优先于 AI 回放结果）
+        // 回填用户设置的声望（_userEdited 的主数值优先于 AI 回放结果，配置为空时不限制）
         const deletedRepCats = new Set(rpg.reputationConfig?._deletedCategories || []);
         const validRepCats = new Set((rpg.reputationConfig?.categories || []).map(c => c.name));
         for (const [owner, cats] of Object.entries(oldReputation)) {
             if (!rpg.reputation[owner]) rpg.reputation[owner] = {};
             for (const [catName, data] of Object.entries(cats)) {
-                if (deletedRepCats.has(catName) || !validRepCats.has(catName)) continue;
+                if (deletedRepCats.has(catName)) continue;
+                if (validRepCats.size > 0 && !validRepCats.has(catName)) continue;
                 if (!rpg.reputation[owner][catName]) {
                     rpg.reputation[owner][catName] = data;
                 } else {
@@ -2194,9 +2217,7 @@ class HoraeManager {
         const deletedSh = rpgMeta._deletedStrongholds || [];
         const snapshot = {
             bars: {}, status: {}, skills: {}, attributes: {}, reputation: {}, equipment: {},
-            levels: JSON.parse(JSON.stringify(rpgMeta.levels || {})),
-            xp: JSON.parse(JSON.stringify(rpgMeta.xp || {})),
-            currency: JSON.parse(JSON.stringify(rpgMeta.currency || {})),
+            levels: {}, xp: {}, currency: {},
             strongholds: JSON.parse(JSON.stringify(userStrongholds)),
         };
 
@@ -2218,7 +2239,7 @@ class HoraeManager {
 
         // 从消息中累积属性（snapshot 是独立对象，不污染 chat[0]）
         const _resolve = (raw) => this._resolveRpgOwner(raw);
-        for (let i = 1; i < end; i++) {
+        for (let i = 0; i < end; i++) {
             const changes = chat[i]?.horae_meta?._rpgChanges;
             if (!changes) continue;
             for (const [raw, barData] of Object.entries(changes.bars || {})) {
@@ -2235,8 +2256,8 @@ class HoraeManager {
                 if (!snapshot.skills[owner]) snapshot.skills[owner] = [];
                 const idx = snapshot.skills[owner].findIndex(s => s.name === sk.name);
                 if (idx >= 0) {
-                    if (sk.level) snapshot.skills[owner][idx].level = sk.level;
-                    if (sk.desc) snapshot.skills[owner][idx].desc = sk.desc;
+                    if (sk.level != null) snapshot.skills[owner][idx].level = sk.level;
+                    if (sk.desc != null) snapshot.skills[owner][idx].desc = sk.desc;
                 } else {
                     snapshot.skills[owner].push({ name: sk.name, level: sk.level, desc: sk.desc });
                 }
