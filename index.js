@@ -3,7 +3,7 @@
  * 基于时间锚点的AI记忆增强系统
  * 
  * 作者: SenriYuki
- * 版本: 1.11.11
+ * 版本: 1.11.12
  */
 
 import { renderExtensionTemplateAsync, getContext, extension_settings } from '/scripts/extensions.js';
@@ -21,7 +21,7 @@ import { t, initI18n, getLanguage, isZhLocale, setLanguage, detectEffectiveAiLan
 const EXTENSION_NAME = 'horae';
 const EXTENSION_FOLDER = `third-party/SillyTavern-Horae`;
 const TEMPLATE_PATH = `${EXTENSION_FOLDER}/assets/templates`;
-const VERSION = '1.11.11';
+const VERSION = '1.11.12';
 
 // 配套正则规则（自动注入ST原生正则系统）
 const HORAE_REGEX_RULES = [
@@ -265,6 +265,7 @@ let doNavbarIconClick = null;
 let isInitialized = false;
 let _isSummaryGeneration = false;
 let _summaryInProgress = false;
+let _chatFullyLoaded = false;
 let itemsMultiSelectMode = false;  // 物品多选模式
 let selectedItems = new Set();     // 选中的物品名称
 let longPressTimer = null;         // 长按计时器
@@ -6004,13 +6005,44 @@ function renderAttrConfig() {
 // 声望系统 UI
 // ============================================
 
-function _getRepConfig() {
+/** 获取 _rpgConfigs 权威存储（顶层键，独立于 rpg 对象，不受 rebuild 影响） */
+function _ensureRpgConfigs() {
     const chat = horaeManager.getChat();
-    if (!chat?.length) return { categories: [], _deletedCategories: [] };
+    if (!chat?.length) return null;
     if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
-    if (!chat[0].horae_meta.rpg) chat[0].horae_meta.rpg = {};
-    if (!chat[0].horae_meta.rpg.reputationConfig) chat[0].horae_meta.rpg.reputationConfig = { categories: [], _deletedCategories: [] };
-    return chat[0].horae_meta.rpg.reputationConfig;
+    if (!chat[0].horae_meta._rpgConfigs) {
+        chat[0].horae_meta._rpgConfigs = {};
+    }
+    return chat[0].horae_meta._rpgConfigs;
+}
+
+/** 将 _rpgConfigs 同步到 rpg 对象上（供 _mergeRpgData 等内部函数使用） */
+function _syncConfigsToRpg() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return;
+    const meta = chat[0].horae_meta;
+    if (!meta?._rpgConfigs) return;
+    if (!meta.rpg) meta.rpg = {};
+    const c = meta._rpgConfigs;
+    if (c.reputationConfig) meta.rpg.reputationConfig = c.reputationConfig;
+    if (c.equipmentConfig) meta.rpg.equipmentConfig = c.equipmentConfig;
+    if (c.currencyConfig) meta.rpg.currencyConfig = c.currencyConfig;
+    if (c._deletedSkills) meta.rpg._deletedSkills = c._deletedSkills;
+    if (c._deletedStrongholds) meta.rpg._deletedStrongholds = c._deletedStrongholds;
+}
+
+function _getRepConfig() {
+    const c = _ensureRpgConfigs();
+    if (!c) return { categories: [], _deletedCategories: [] };
+    if (!c.reputationConfig) {
+        // 迁移：从 rpg 内部读旧数据
+        const chat = horaeManager.getChat();
+        const oldCfg = chat[0]?.horae_meta?.rpg?.reputationConfig;
+        c.reputationConfig = oldCfg && oldCfg.categories?.length
+            ? oldCfg
+            : { categories: [], _deletedCategories: [] };
+    }
+    return c.reputationConfig;
 }
 
 function _getRepValues() {
@@ -6023,6 +6055,7 @@ function _getRepValues() {
 }
 
 function _saveRepData() {
+    _syncConfigsToRpg();
     getContext().saveChat();
 }
 
@@ -6302,10 +6335,14 @@ function _getEqConfigMap() {
     if (!chat?.length) return { locked: false, perChar: {} };
     if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
     if (!chat[0].horae_meta.rpg) chat[0].horae_meta.rpg = {};
-    let cfg = chat[0].horae_meta.rpg.equipmentConfig;
+    const c = _ensureRpgConfigs();
+    // 优先从 _rpgConfigs 读取
+    let cfg = c?.equipmentConfig || chat[0].horae_meta.rpg.equipmentConfig;
     if (!cfg) {
-        chat[0].horae_meta.rpg.equipmentConfig = { locked: false, perChar: {} };
-        return chat[0].horae_meta.rpg.equipmentConfig;
+        cfg = { locked: false, perChar: {} };
+        if (c) c.equipmentConfig = cfg;
+        chat[0].horae_meta.rpg.equipmentConfig = cfg;
+        return cfg;
     }
     // 旧格式迁移：{ slots: [...] } → { perChar: { owner: { slots } } }
     if (Array.isArray(cfg.slots)) {
@@ -6317,10 +6354,12 @@ function _getEqConfigMap() {
         for (const owner of Object.keys(eqValues)) {
             perChar[owner] = { slots: JSON.parse(JSON.stringify(oldSlots)), _deletedSlots: [...oldDeleted] };
         }
-        chat[0].horae_meta.rpg.equipmentConfig = { locked, perChar };
-        return chat[0].horae_meta.rpg.equipmentConfig;
+        cfg = { locked, perChar };
     }
     if (!cfg.perChar) cfg.perChar = {};
+    // 同步到两个存储位置
+    if (c) c.equipmentConfig = cfg;
+    chat[0].horae_meta.rpg.equipmentConfig = cfg;
     return cfg;
 }
 
@@ -6734,8 +6773,14 @@ function _getCurConfig() {
     if (!chat?.length) return { denominations: [] };
     if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
     if (!chat[0].horae_meta.rpg) chat[0].horae_meta.rpg = {};
-    if (!chat[0].horae_meta.rpg.currencyConfig) chat[0].horae_meta.rpg.currencyConfig = { denominations: [] };
-    return chat[0].horae_meta.rpg.currencyConfig;
+    const c = _ensureRpgConfigs();
+    let cfg = c?.currencyConfig || chat[0].horae_meta.rpg.currencyConfig;
+    if (!cfg) {
+        cfg = { denominations: [] };
+    }
+    if (c) c.currencyConfig = cfg;
+    chat[0].horae_meta.rpg.currencyConfig = cfg;
+    return cfg;
 }
 
 function _saveCurData() {
@@ -6900,10 +6945,14 @@ function _getStrongholdData() {
     if (!chat?.length) return [];
     if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
     if (!chat[0].horae_meta.rpg) chat[0].horae_meta.rpg = {};
-    if (!chat[0].horae_meta.rpg.strongholds) chat[0].horae_meta.rpg.strongholds = [];
-    return chat[0].horae_meta.rpg.strongholds;
+    const c = _ensureRpgConfigs();
+    let nodes = c?.strongholds || chat[0].horae_meta.rpg.strongholds;
+    if (!nodes) nodes = [];
+    if (c) c.strongholds = nodes;
+    chat[0].horae_meta.rpg.strongholds = nodes;
+    return nodes;
 }
-function _saveStrongholdData() { getContext().saveChat(); }
+function _saveStrongholdData() { _syncConfigsToRpg(); getContext().saveChat(); }
 
 function _genShId() { return 'sh_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
@@ -7075,11 +7124,15 @@ function _bindStrongholdEvents() {
             const rpg = chat?.[0]?.horae_meta?.rpg;
             if (rpg) {
                 if (!rpg._deletedStrongholds) rpg._deletedStrongholds = [];
+                const cfgs = _ensureRpgConfigs();
+                if (cfgs && !cfgs._deletedStrongholds) cfgs._deletedStrongholds = rpg._deletedStrongholds;
                 function collectDeleted(pid) {
                     const n = nodes.find(x => x.id === pid);
                     if (n) {
                         const parentNode = n.parent ? nodes.find(x => x.id === n.parent) : null;
-                        rpg._deletedStrongholds.push({ name: n.name, parent: parentNode?.name || null });
+                        const entry = { name: n.name, parent: parentNode?.name || null };
+                        rpg._deletedStrongholds.push(entry);
+                        if (cfgs && cfgs._deletedStrongholds !== rpg._deletedStrongholds) cfgs._deletedStrongholds.push(entry);
                     }
                     nodes.filter(x => x.parent === pid).forEach(k => collectDeleted(k.id));
                 }
@@ -7317,9 +7370,12 @@ function renderRpgHud(messageEl, messageIndex) {
     if (old) old.remove();
     if (!settings.rpgMode || settings.sendRpgBars === false) return;
 
-    const chatLen = horaeManager.getChat()?.length || 0;
+    const _hChat = horaeManager.getChat();
+    const chatLen = _hChat?.length || 0;
     const skip = Math.max(0, chatLen - messageIndex - 1);
     const rpg = horaeManager.getRpgStateAt(skip);
+    const _hCfgs = _hChat?.[0]?.horae_meta?._rpgConfigs;
+    if (!rpg.currencyConfig) rpg.currencyConfig = _hCfgs?.currencyConfig || _hChat?.[0]?.horae_meta?.rpg?.currencyConfig || { denominations: [] };
 
     const meta = horaeManager.getMessageMeta(messageIndex);
     const present = meta?.scene?.characters_present || [];
@@ -7374,7 +7430,8 @@ function _buildRpgSnapshotMap(chat) {
         currency: JSON.parse(JSON.stringify(baseRpg.currency || {})),
     };
     const resolve = (raw) => horaeManager._resolveRpgOwner(raw);
-    const curConfig = baseRpg.currencyConfig || { denominations: [] };
+    const _bCfgs = chat[0]?.horae_meta?._rpgConfigs;
+    const curConfig = _bCfgs?.currencyConfig || baseRpg.currencyConfig || { denominations: [] };
     const validDenoms = new Set((curConfig.denominations || []).map(d => d.name));
 
     for (let i = 0; i < chat.length; i++) {
@@ -7482,6 +7539,7 @@ function refreshAllDisplays() {
 const _GLOBAL_META_KEYS = [
     'autoSummaries', '_deletedNpcs', '_deletedAgendaTexts',
     'locationMemory', 'relationships', 'rpg',
+    '_rpgConfigs',
 ];
 
 function _saveGlobalMeta(meta) {
@@ -10699,6 +10757,8 @@ function initSettingsEvents() {
             if (!rpg._deletedSkills.some(d => d.owner === owner && d.name === skillName)) {
                 rpg._deletedSkills.push({ owner, name: skillName });
             }
+            const _cfgDel = _ensureRpgConfigs();
+            if (_cfgDel) _cfgDel._deletedSkills = rpg._deletedSkills;
             getContext().saveChat();
             updateRpgDisplay();
         }
@@ -14426,6 +14486,24 @@ function _importAsInitialState(importObj, chat) {
                 }
             }
         }
+        // 兼容：导入的数据可能在 _rpgConfigs 中
+        if (meta._rpgConfigs) {
+            if (!target._rpgConfigs) target._rpgConfigs = {};
+            for (const ck of ['reputationConfig', 'equipmentConfig', 'currencyConfig', '_deletedSkills', 'strongholds', '_deletedStrongholds']) {
+                if (meta._rpgConfigs[ck]) target._rpgConfigs[ck] = JSON.parse(JSON.stringify(meta._rpgConfigs[ck]));
+            }
+        }
+    }
+
+    // 将 rpg 内嵌的 config 也同步到 _rpgConfigs
+    if (target.rpg) {
+        if (!target._rpgConfigs) target._rpgConfigs = {};
+        if (target.rpg.reputationConfig) target._rpgConfigs.reputationConfig = target.rpg.reputationConfig;
+        if (target.rpg.equipmentConfig) target._rpgConfigs.equipmentConfig = target.rpg.equipmentConfig;
+        if (target.rpg.currencyConfig) target._rpgConfigs.currencyConfig = target.rpg.currencyConfig;
+        if (target.rpg._deletedSkills) target._rpgConfigs._deletedSkills = target.rpg._deletedSkills;
+        if (target.rpg.strongholds) target._rpgConfigs.strongholds = target.rpg.strongholds;
+        if (target.rpg._deletedStrongholds) target._rpgConfigs._deletedStrongholds = target.rpg._deletedStrongholds;
     }
     
     // 自定义表格
@@ -14565,7 +14643,15 @@ async function onMessageReceived(messageId) {
             message.mes = sanitized;
         }
         
-        isRegenerate = !!(message.horae_meta?.timestamp?.absolute);
+        const hasExistingMeta = !!(message.horae_meta?.timestamp?.absolute);
+
+        // 判断是否为历史消息渲染（非新消息、非当前最新消息的重生成）
+        // CHARACTER_MESSAGE_RENDERED 会为所有已有消息触发，包括页面加载和滚动加载
+        if (hasExistingMeta && messageId < chat.length - 1) {
+            return;
+        }
+
+        isRegenerate = hasExistingMeta;
         let savedFlags = null;
         let savedGlobal = null;
         if (isRegenerate) {
@@ -14819,10 +14905,34 @@ function _rebuildGlobalDataForCurrentChat() {
  */
 async function onChatChanged() {
     if (!settings.enabled) return;
+    _chatFullyLoaded = false;
     
     try {
         clearTableHistory();
         horaeManager.init(getContext(), settings);
+
+        // ── 迁移旧数据：将 rpg 内嵌 config 提升到 _rpgConfigs 顶层键 ──
+        const _mc = horaeManager.getChat();
+        if (_mc?.length && _mc[0].horae_meta) {
+            const _m = _mc[0].horae_meta;
+            if (!_m._rpgConfigs) _m._rpgConfigs = {};
+            const _rpg = _m.rpg;
+            if (_rpg) {
+                if (_rpg.reputationConfig && !_m._rpgConfigs.reputationConfig)
+                    _m._rpgConfigs.reputationConfig = _rpg.reputationConfig;
+                if (_rpg.equipmentConfig && !_m._rpgConfigs.equipmentConfig)
+                    _m._rpgConfigs.equipmentConfig = _rpg.equipmentConfig;
+                if (_rpg.currencyConfig && !_m._rpgConfigs.currencyConfig)
+                    _m._rpgConfigs.currencyConfig = _rpg.currencyConfig;
+                if (_rpg._deletedSkills && !_m._rpgConfigs._deletedSkills)
+                    _m._rpgConfigs._deletedSkills = _rpg._deletedSkills;
+                if (_rpg.strongholds && !_m._rpgConfigs.strongholds)
+                    _m._rpgConfigs.strongholds = _rpg.strongholds;
+                if (_rpg._deletedStrongholds && !_m._rpgConfigs._deletedStrongholds)
+                    _m._rpgConfigs._deletedStrongholds = _rpg._deletedStrongholds;
+            }
+        }
+
         _rebuildGlobalDataForCurrentChat();
         refreshAllDisplays();
         renderCustomTablesList();
@@ -14830,6 +14940,7 @@ async function onChatChanged() {
     } catch (err) {
         console.error('[Horae] onChatChanged 初始化失败:', err);
     }
+    _chatFullyLoaded = true;
 
     if (settings.vectorEnabled && vectorManager.isReady) {
         try {
@@ -15153,5 +15264,6 @@ jQuery(async () => {
     }
     
     isInitialized = true;
+    _chatFullyLoaded = true;
     console.log(`[Horae] v${VERSION} 加载完成！作者: SenriYuki`);
 });
