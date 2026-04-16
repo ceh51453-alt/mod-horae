@@ -134,6 +134,7 @@ class HoraeManager {
         if (lang === 'ko') return '50-80자';
         if (lang === 'ja') return '40-70文字';
         if (lang === 'ru') return '80-150 символов';
+        if (lang === 'vi') return '80-150 ký tự';
         return '80-130 chars';
     }
 
@@ -146,6 +147,7 @@ class HoraeManager {
             'zh-CN': ['主角', '角色'], 'zh-TW': ['主角', '角色'],
             'ja': ['主人公', 'キャラ'], 'ko': ['주인공', '캐릭터'],
             'ru': ['протагонист', 'персонаж'],
+            'vi': ['nhân vật chính', 'nhân vật'],
         };
         const [du, dc] = defaults[lang] || ['protagonist', 'character'];
         return [userName || du, charName || dc];
@@ -548,11 +550,12 @@ class HoraeManager {
         const lines = [];
 
         const lang = this._getAiOutputLang();
-        const L = (zh, en, ja, ko, ru) => {
+        const L = (zh, en, ja, ko, ru, vi) => {
             if (lang === 'zh-CN' || lang === 'zh-TW') return zh;
             if (lang === 'ja') return ja;
             if (lang === 'ko') return ko;
             if (lang === 'ru') return ru;
+            if (lang === 'vi') return vi || en;
             return en;
         };
         
@@ -3297,6 +3300,7 @@ class HoraeManager {
             'zh-CN': '\n═══ 最终强制提醒 ═══', 'zh-TW': '\n═══ 最終強制提醒 ═══',
             'ja': '\n═══ 最終必須リマインダー ═══', 'ko': '\n═══ 최종 필수 리마인더 ═══',
             'ru': '\n═══ Финальное обязательное напоминание ═══',
+            'vi': '\n═══ Nhắc Nhở Bắt Buộc Cuối Cùng ═══',
         };
         const marker = markers[lang] || '\n═══ Final Mandatory Reminder ═══';
         base = base.replace(marker, subs + marker);
@@ -3308,6 +3312,7 @@ class HoraeManager {
         if (lang === 'ja') return this._getDefaultSystemPromptJa();
         if (lang === 'ko') return this._getDefaultSystemPromptKo();
         if (lang === 'ru') return this._getDefaultSystemPromptRu();
+        if (lang === 'vi') return this._getDefaultSystemPromptVi();
         if (lang !== 'zh-CN' && lang !== 'zh-TW') return this._getDefaultSystemPromptEn();
         const sceneDescLine = this.settings?.sendLocationMemory ? '\nscene_desc:地点固定物理特征（见场景记忆规则，触发时才写）' : '';
         const relLine = this.settings?.sendRelationships ? '\nrel:角色A>角色B=关系类型|备注（见关系网络规则，触发时才写）' : '';
@@ -4088,11 +4093,168 @@ ${this._generateMustTagsReminder()}
 Эти поля НЕ являются необязательными — они обязательны.`;
     }
 
+    _getDefaultSystemPromptVi() {
+        const sceneDescLine = this.settings?.sendLocationMemory ? '\nscene_desc:đặc điểm vật lý cố định của địa điểm (xem quy tắc Bộ nhớ bối cảnh, chỉ ghi khi kích hoạt)' : '';
+        const relLine = this.settings?.sendRelationships ? '\nrel:NhânVậtA>NhânVậtB=loại quan hệ|ghi chú (xem quy tắc Mạng lưới quan hệ, chỉ ghi khi kích hoạt)' : '';
+        const moodLine = this.settings?.sendMood ? '\nmood:tên nhân vật=trạng thái cảm xúc/tâm lý (xem quy tắc Theo dõi tâm trạng, chỉ ghi khi kích hoạt)' : '';
+        return `[Hệ thống Ký ức Horae] (Các ví dụ dưới đây chỉ để minh họa — KHÔNG sao chép vào phần văn xuôi!)
+
+═══ Nguyên tắc cốt lõi: Hướng thay đổi ═══
+★★★ Trước khi viết tag <horae>, xác định thông tin nào THỰC SỰ THAY ĐỔI trong lượt này ★★★
+  ① Cơ bản bối cảnh (time/location/characters/costume) → bắt buộc mỗi lượt
+  ② Tất cả trường khác → tuân thủ nghiêm ngặt điều kiện kích hoạt; nếu không thay đổi, KHÔNG viết dòng đó
+  ③ NPC/vật phẩm đã ghi nhận mà không có thông tin mới → KHÔNG xuất! Lặp lại dữ liệu không đổi = lãng phí token
+  ④ Thay đổi một phần → dùng cập nhật tăng dần, chỉ ghi phần thay đổi
+  ⑤ NPC xuất hiện lần đầu → cả dòng npc: và affection: đều bắt buộc!
+
+═══ Định dạng Tag ═══
+Thêm hai tag ở cuối mỗi phản hồi:
+<horae>
+time:ngày giờ (bắt buộc)
+location:địa điểm (bắt buộc. Dùng · để phân cách địa điểm nhiều cấp, VD: "Quán rượu·Đại sảnh" "Cung điện·Phòng ngai". Luôn dùng cùng tên cho cùng địa điểm)
+atmosphere:bầu không khí${sceneDescLine}
+characters:tên các nhân vật có mặt, phân cách bằng dấu phẩy (bắt buộc)
+costume:tên nhân vật=mô tả trang phục (bắt buộc, mỗi người một dòng, không dùng dấu chấm phẩy)
+item/item!/item!!:xem quy tắc Vật phẩm (chỉ khi kích hoạt)
+item-:tên vật phẩm (xóa vật phẩm đã tiêu hao/mất. Xem quy tắc Vật phẩm, chỉ khi kích hoạt)
+affection:tên nhân vật=giá trị thiện cảm (★ bắt buộc khi NPC xuất hiện lần đầu! Sau đó chỉ khi giá trị thay đổi)
+npc:tên|ngoại hình=tính cách@quan hệ~trường mở rộng (★ bắt buộc khi NPC xuất hiện lần đầu! Sau đó chỉ khi thay đổi)
+agenda:ngày|nội dung (chỉ khi tạo lịch trình mới)
+agenda-:từ khóa nội dung (khi lịch trình hoàn thành/hết hạn, hệ thống tự động xóa khớp)${relLine}${moodLine}
+</horae>
+<horaeevent>
+event:mức quan trọng|tóm tắt (${this._getEventCharLimit()}, mức: normal/important/critical, tóm tắt sự kiện trong tin nhắn này để theo dõi cốt truyện)
+</horaeevent>
+
+═══ [Vật phẩm] Điều kiện kích hoạt & Quy tắc ═══
+Tham chiếu ID vật phẩm (#ID) trong [Danh sách vật phẩm]. Chỉ xuất khi đáp ứng điều kiện dưới đây.
+
+[Khi nào ghi] (chỉ xuất nếu đáp ứng bất kỳ điều kiện nào)
+  ✦ Nhận vật phẩm mới → item:/item!:/item!!:
+  ✦ Vật phẩm hiện có thay đổi số lượng/người giữ/vị trí/bản chất → item: (chỉ phần thay đổi)
+  ✦ Vật phẩm bị tiêu hao/mất/cạn kiệt → item-:tên vật phẩm
+[Khi nào KHÔNG ghi]
+  ✗ Không có thay đổi vật phẩm → KHÔNG xuất bất kỳ dòng item nào
+  ✗ Vật phẩm chỉ được đề cập mà không thay đổi trạng thái → KHÔNG ghi
+
+[Định dạng]
+  Mới: item:emoji tên(số lượng)|mô tả=người giữ@vị trí chính xác (mô tả tùy chọn trừ khi vật phẩm có ý nghĩa đặc biệt như quà tặng hoặc kỷ vật)
+  Mới (quan trọng): item!:emoji tên(số lượng)|mô tả=người giữ@vị trí chính xác (vật phẩm quan trọng, mô tả bắt buộc: ngoại hình+chức năng+nguồn gốc)
+  Mới (then chốt): item!!:emoji tên(số lượng)|mô tả=người giữ@vị trí chính xác (đạo cụ then chốt, mô tả chi tiết bắt buộc)
+  Vật phẩm hiện có thay đổi: item:emoji tên(số lượng mới)=người giữ mới@vị trí mới (chỉ cập nhật phần thay đổi, bỏ | để giữ mô tả gốc)
+  Tiêu hao/mất: item-:tên vật phẩm
+
+[Quy tắc cấp trường]
+  · Mô tả: ghi nhận thuộc tính thiết yếu (ngoại hình/chức năng/nguồn gốc). Tùy chọn cho vật phẩm thường, bắt buộc cho vật phẩm quan trọng/then chốt lần đầu
+    ★ Đặc điểm thị giác (màu sắc, chất liệu, kích thước — để mô tả nhất quán trong tương lai)
+    ★ Chức năng/mục đích
+    ★ Nguồn gốc (ai tặng / cách nhận được)
+       - Ví dụ (chỉ minh họa, KHÔNG sao chép vào văn xuôi!):
+         - VD1: item!:🌹Bó Hoa Vĩnh Cửu|hoa hồng đỏ thẫm sấy khô buộc ruy-băng satin đen, quà Valentine từ C cho U=U@bàn trong phòng U
+         - VD2: item!:🎫Vé Quay 10 Lần May Mắn|phiếu giấy vàng phát sáng, một lần quay 10 trong gacha hệ thống dành cho người mới=U@nhẫn không gian
+         - VD3: item!!:🏧ATM Tiền Tệ Đa Giới|trông giống ATM thu nhỏ, đổi tiền tệ giữa các giới với tỷ giá trực tiếp=U@quầy quán rượu
+  · Số lượng: vật phẩm đơn không cần (1)/(1 cái); chỉ dùng ngoặc cho đơn vị đo như (5kg)(1L)(1 thùng)
+  · Vị trí: phải là địa điểm cố định cụ thể
+    ❌ trên mặt đất trước ai đó, bên cạnh ai đó, trên sàn, trên bàn
+    ✅ sàn đại sảnh quán rượu, quầy nhà hàng, nhà bếp, ba lô, trên bàn phòng U
+  · KHÔNG liệt kê nội thất cố định và vật dụng gắn liền tòa nhà làm vật phẩm
+  · Mượn tạm ≠ chuyển quyền sở hữu
+
+
+Ví dụ (vòng đời bia):
+  Nhận: item:🍺Bia Cũ Lâu Năm(50L)|bia cũ tìm trong kho, vị hơi chua=U@kệ thực phẩm bếp quán rượu
+  Thay đổi số lượng: item:🍺Bia Cũ Lâu Năm(25L)=U@kệ thực phẩm bếp quán rượu
+  Cạn kiệt: item-:Bia Cũ Lâu Năm
+
+═══ [NPC] Điều kiện kích hoạt & Quy tắc ═══
+Định dạng: npc:tên|ngoại hình=tính cách@quan hệ với {{user}}~gender:giá trị~age:giá trị~race:giá trị~occupation:giá trị~birthday:giá trị
+Dấu phân cách: | phân tách tên, = phân tách ngoại hình và tính cách, @ phân tách quan hệ, ~ phân tách trường mở rộng (key:value)
+
+[Khi nào ghi] (chỉ xuất dòng npc: của NPC nếu đáp ứng bất kỳ điều kiện nào)
+  ✦ Xuất hiện lần đầu → định dạng đầy đủ với TẤT CẢ trường và TẤT CẢ trường ~mở rộng (gender/age/race/occupation), không được bỏ sót
+  ✦ Thay đổi ngoại hình vĩnh viễn (vết sẹo, kiểu tóc mới, v.v.) → chỉ ghi trường ngoại hình
+  ✦ Thay đổi tính cách (sau sự kiện lớn) → chỉ ghi trường tính cách
+  ✦ Quan hệ với {{user}} thay đổi (khách hàng → bạn bè) → chỉ ghi trường quan hệ
+  ✦ Biết thông tin mới về NPC này (chiều cao/cân nặng trước đó không biết) → thêm vào trường liên quan
+  ✦ Trường ~mở rộng thay đổi (nghề nghiệp thay đổi) → chỉ ghi trường ~mở rộng đã thay đổi
+[Khi nào KHÔNG ghi]
+  ✗ NPC có mặt nhưng không có thông tin mới → KHÔNG viết dòng npc:
+  ✗ NPC quay lại sau khi vắng mặt mà không thay đổi → KHÔNG viết lại
+  ✗ Muốn diễn giải lại mô tả hiện có bằng từ đồng nghĩa → nghiêm cấm!
+    ❌ "cơ bắp/đầy vết sẹo chiến trận" → "khỏe mạnh/có sẹo" (diễn giải ≠ cập nhật)
+    ✅ "cơ bắp/đầy vết sẹo chiến trận/bị thương nặng" → "cơ bắp/đầy vết sẹo chiến trận" (đã hồi phục, xóa trạng thái cũ)
+
+[Ví dụ cập nhật tăng dần] (dùng NPC "Sói" làm ví dụ)
+  Lần đầu: npc:Sói|lông xám bạc/mắt xanh lá/cao 220cm/vết sẹo chiến trận=lính đánh thuê bộ binh nặng trầm lặng@khách hàng đầu tiên của {{user}}~gender:nam~age:~35~race:thú nhân sói~occupation:lính đánh thuê
+  Chỉ quan hệ: npc:Sói|=@người yêu của {{user}}
+  Thêm ngoại hình: npc:Sói|lông xám bạc/mắt xanh lá/cao 220cm/vết sẹo chiến trận/tay trái bị băng
+  Chỉ tính cách: npc:Sói|=không còn trầm lặng/thỉnh thoảng mỉm cười
+  Chỉ nghề nghiệp: npc:Sói|~occupation:lính đánh thuê đã nghỉ hưu
+(Lưu ý: KHÔNG viết các trường và trường ~mở rộng không thay đổi! Hệ thống tự động bảo toàn dữ liệu gốc!)
+
+[Trường Ngày sinh (trường mở rộng tùy chọn)]
+  Định dạng: ~birthday:yyyy/mm/dd hoặc ~birthday:mm/dd (chỉ tháng/ngày khi không biết năm)
+  ⚠ Chỉ ghi khi ngày sinh được TUYÊN BỐ RÕ RÀNG trong cài đặt/mô tả nhân vật! Tuyệt đối KHÔNG đoán hoặc bịa đặt!
+  ⚠ Nếu ngày sinh không có nguồn rõ ràng, KHÔNG ghi trường này — để người dùng tự điền thủ công.
+
+[Quy tắc mô tả quan hệ]
+  Phải bao gồm tên mục tiêu và chính xác: ❌khách hàng ✅khách mới đến thăm {{user}} / ❌chủ nợ ✅người giữ khoản nợ của {{user}} / ❌chủ nhà trọ ✅chủ nhà của {{user}} / ❌bạn trai ✅bạn trai của {{user}} / ❌ân nhân ✅người đã cứu mạng {{user}} / ❌kẻ bắt nạt ✅người hay bắt nạt {{user}} / ❌người ngưỡng mộ bí mật ✅người đang thầm yêu {{user}} / ❌kẻ thù ✅người có cha bị {{user}} giết
+  Với quan hệ phụ thuộc bao gồm tên NPC: ✅chó săn của Ivan; thú cưng của khách hàng {{user}} / bạn gái Ivan; khách hàng của {{user}} / bạn thân nhất của {{user}}; vợ Ivan / cha dượng của {{user}}; cha Ivan / người yêu của {{user}}; anh/em trai Ivan / bạn thân nhất của {{user}}; tình nhân chồng {{user}}; kẻ phá hoại hôn nhân {{user}} và Ivan
+
+═══ [Thiện cảm] Điều kiện kích hoạt ═══
+Chỉ ghi thiện cảm của NPC đối với {{user}} (không bao giờ ghi bản thân {{user}}). Mỗi người một dòng. Không ghi chú sau con số.
+
+[Khi nào ghi]
+  ✦ NPC xuất hiện lần đầu → đặt giá trị khởi tạo dựa trên quan hệ (người lạ 0-20 / quen biết 30-50 / bạn bè 50-70 / người yêu 70-90)
+  ✦ Tương tác gây thay đổi thiện cảm đáng kể → affection:tên=tổng mới
+[Khi nào KHÔNG ghi]
+  ✗ Thiện cảm không đổi → không ghi
+
+═══ [Lịch trình] Điều kiện kích hoạt ═══
+[Khi nào ghi (mới)]
+  ✦ Cuộc hẹn/kế hoạch/lịch trình/nhiệm vụ/manh mối cốt truyện mới → agenda:ngày|nội dung
+  Định dạng: agenda:ngày thiết lập|nội dung (thời gian tương đối phải bao gồm ngày tuyệt đối trong ngoặc)
+  Ví dụ: agenda:2026/02/10|Allen mời {{user}} ăn tối Valentine (2026/02/14 18:00)
+[Khi nào ghi (xóa hoàn thành) — quan trọng!]
+  ✦ Lịch trình hoàn thành/hết hạn/bị hủy → PHẢI dùng agenda-: để đánh dấu xóa
+  Định dạng: agenda-:nội dung (ghi từ khóa mục đã hoàn thành, hệ thống tự động xóa khớp)
+  Ví dụ: agenda-:Allen mời {{user}} ăn tối Valentine
+  ⚠ KHÔNG dùng agenda:nội dung(xong)! PHẢI dùng tiền tố agenda-:!
+  ⚠ KHÔNG trùng lặp nội dung lịch trình đã có!
+[Khi nào KHÔNG ghi]
+  ✗ Lịch trình hiện có không đổi → KHÔNG lặp lại mỗi lượt
+  ✗ Lịch trình hoàn thành → KHÔNG đánh dấu xong bằng ngoặc agenda:, PHẢI dùng agenda-:
+
+═══ Quy tắc định dạng thời gian ═══
+KHÔNG dùng "Ngày 1"/"Ngày X" hoặc định dạng mơ hồ tương tự. Dùng ngày lịch cụ thể.
+- Hiện đại: Năm/Tháng/Ngày Giờ:Phút (VD: 2026/2/4 15:00)
+- Lịch sử: Ngày phù hợp thời kỳ (VD: 1920/3/15 14:00)
+- Fantasy/hư cấu: Lịch của thế giới đó (VD: Ngày thứ Ba tháng Sương Giáng, hoàng hôn)
+
+═══ Nhắc Nhở Bắt Buộc Cuối Cùng ═══
+${this._generateMustTagsReminder()}
+
+[Trường bắt buộc mỗi lượt — thiếu bất kỳ = không đạt!]
+  ✅ time: ← ngày giờ hiện tại
+  ✅ location: ← địa điểm hiện tại
+  ✅ atmosphere: ← bầu không khí
+  ✅ characters: ← tên tất cả nhân vật có mặt, phân cách bằng dấu phẩy (KHÔNG ĐƯỢC bỏ sót!)
+  ✅ costume: ← một dòng mô tả trang phục cho mỗi nhân vật có mặt
+  ✅ event: ← mức quan trọng|tóm tắt sự kiện
+
+[Bắt buộc thêm khi NPC xuất hiện lần đầu — tất cả bắt buộc!]
+  ✅ npc:tên|ngoại hình=tính cách@quan hệ~gender:giá trị~age:giá trị~race:giá trị~occupation:giá trị~birthday:giá trị (chỉ khi biết; nếu không biết, bỏ)
+  ✅ affection:tên NPC=thiện cảm khởi tạo (người lạ 0-20 / quen biết 30-50 / bạn bè 50-70 / người yêu 70-90)
+
+Các trường này KHÔNG phải tùy chọn — chúng là bắt buộc.`;
+    }
+
     getDefaultTablesPrompt() {
         const lang = this._getAiOutputLang();
         if (lang === 'ja') return this._getDefaultTablesPromptJa();
         if (lang === 'ko') return this._getDefaultTablesPromptKo();
         if (lang === 'ru') return this._getDefaultTablesPromptRu();
+        if (lang === 'vi') return this._getDefaultTablesPromptVi();
         if (lang !== 'zh-CN' && lang !== 'zh-TW') return this._getDefaultTablesPromptEn();
         return `═══ 自定义表格规则 ═══
 上方有用户自定义表格，根据"填写要求"填写数据。
@@ -4163,11 +4325,26 @@ There are user-defined tables above. Fill in data according to the "Fill Require
   - Новые строки: добавлять после текущего максимального номера строки; новые столбцы: после максимального номера столбца`;
     }
 
+    _getDefaultTablesPromptVi() {
+        return `═══ Quy tắc Bảng Tùy chỉnh ═══
+Phía trên có bảng tùy chỉnh của người dùng, điền dữ liệu theo "Yêu cầu điền".
+★ Định dạng: bên trong tag <horaetable:tên bảng>, mỗi ô một dòng → dòng,cột:nội dung
+★★ Tọa độ: Dòng 0 và cột 0 là tiêu đề. Dữ liệu bắt đầu từ 1,1. Số dòng = chỉ mục dòng dữ liệu, số cột = chỉ mục cột dữ liệu
+★★★ Quy tắc điền ★★★
+  - Ô trống mà có thông tin từ cốt truyện → BẮT BUỘC điền! Không bỏ qua!
+  - Nội dung hiện có không thay đổi → không ghi đè
+  - Không có thông tin liên quan cho dòng/cột này → để trống
+  - KHÔNG xuất "(trống)" "-" "không" làm giữ chỗ
+  - 🔒 dòng/cột đánh dấu — chỉ đọc, KHÔNG thay đổi nội dung
+  - Dòng mới: thêm sau số dòng tối đa hiện tại; cột mới: sau số cột tối đa`;
+    }
+
     getDefaultLocationPrompt() {
         const lang = this._getAiOutputLang();
         if (lang === 'ja') return this._getDefaultLocationPromptJa();
         if (lang === 'ko') return this._getDefaultLocationPromptKo();
         if (lang === 'ru') return this._getDefaultLocationPromptRu();
+        if (lang === 'vi') return this._getDefaultLocationPromptVi();
         if (lang !== 'zh-CN' && lang !== 'zh-TW') return this._getDefaultLocationPromptEn();
         return `═══ 【场景记忆】触发条件 ═══
 格式：scene_desc:位于…。该地点的固定物理特征描述（50-150字）
@@ -4324,6 +4501,37 @@ Scene Memory records a location's core layout and permanent features (architectu
   · [Память сцены|...] выше содержит записанные системой характеристики локации; сохраняйте эти ключевые элементы, свободно варьируя детали в зависимости от времени/сезона/сюжета`;
     }
 
+    _getDefaultLocationPromptVi() {
+        return `═══ [Bộ nhớ cảnh] Điều kiện kích hoạt ═══
+Định dạng: scene_desc:Tọa lạc tại... Đặc điểm vật lý cố định của địa điểm này (120-300 ký tự)
+Bộ nhớ cảnh ghi lại bố cục cốt lõi và đặc điểm vĩnh viễn của địa điểm (cấu trúc kiến trúc, nội thất cố định, đặc tính không gian) để duy trì mô tả cảnh nhất quán giữa các lượt.
+
+[Địa điểm / Định dạng "Tọa lạc tại"] ★★★ Tuân thủ nghiêm ngặt quy tắc phân cấp ★★★
+  · Bắt đầu mô tả bằng "Tọa lạc tại" để chỉ vị trí của địa điểm này so với địa điểm cha, sau đó mô tả đặc điểm vật lý riêng của nó
+  · Địa điểm con (tên chứa dấu phân cách ·): "Tọa lạc tại" chỉ mô tả vị trí trong tòa nhà cha (tầng nào, hướng nào). Tuyệt đối KHÔNG bao gồm thông tin địa lý bên ngoài của địa điểm cha
+  · Địa điểm cha/cấp cao nhất: "Tọa lạc tại" mô tả vị trí địa lý bên ngoài (lục địa nào, gần khu rừng nào)
+  · Hệ thống tự động gửi mô tả địa điểm cha cho AI; địa điểm con KHÔNG ĐƯỢC lặp lại thông tin cha
+    ✓ Quán Trọ Vô Danh·Phòng 203 → scene_desc:Tọa lạc tại tầng 2 phía đông. Phòng góc, ánh sáng tốt, giường gỗ đơn sát tường, cửa sổ hướng đông
+    ✓ Quán Trọ Vô Danh·Đại Sảnh → scene_desc:Tọa lạc tại tầng 1. Không gian gỗ trần cao, quầy bar dài ở trung tâm, các bàn tròn rải rác
+    ✓ Quán Trọ Vô Danh → scene_desc:Tọa lạc tại rìa rừng XX phía bắc lục địa OO. Công trình gỗ đá hai tầng, tầng trệt có đại sảnh và quầy bar, tầng trên là phòng khách
+    ✗ Quán Trọ Vô Danh·Phòng 203 → scene_desc:Tọa lạc tại rìa rừng XX phía bắc lục địa OO trong Quán Trọ Vô Danh tầng 2... (❌ địa điểm con KHÔNG ĐƯỢC bao gồm địa lý bên ngoài của cha)
+[Quy tắc đặt tên địa điểm]
+  · Dùng · để phân tách địa điểm nhiều cấp: Tòa nhà·Khu vực (ví dụ "Quán Trọ Vô Danh·Đại Sảnh" "Cung Điện·Ngục Tối")
+  · Cùng một địa điểm phải luôn dùng đúng tên như hiển thị trong [Cảnh|...] ở trên; không viết tắt hoặc diễn giải lại
+  · Các khu vực cùng tên trong các tòa nhà khác nhau được ghi độc lập
+[Khi nào ghi]
+  ✦ Đến một địa điểm mới lần đầu → BẮT BUỘC ghi scene_desc với đặc điểm vật lý cố định
+  ✦ Thay đổi vật lý vĩnh viễn tại địa điểm (phá hủy, cải tạo) → ghi scene_desc cập nhật
+[Khi nào KHÔNG ghi]
+  ✗ Quay lại địa điểm đã ghi mà không có thay đổi vật lý → không ghi
+  ✗ Thay đổi mùa/thời tiết/bầu không khí → không ghi (đây là tạm thời, không phải đặc điểm cố định)
+[Quy tắc mô tả]
+  · Chỉ ghi đặc điểm vật lý cố định/vĩnh viễn: cấu trúc không gian, vật liệu xây dựng, nội thất cố định, hướng cửa sổ, trang trí mang tính biểu tượng
+  · KHÔNG ghi trạng thái tạm thời: ánh sáng hiện tại, thời tiết, đám đông, trang trí theo mùa, vật phẩm đặt tạm
+  · KHÔNG sao chép văn bản bộ nhớ cảnh nguyên văn vào bài viết; dùng làm tài liệu tham khảo nền và viết lại dựa trên thời gian/thời tiết/ánh sáng/góc nhìn nhân vật hiện tại
+  · [Bộ nhớ cảnh|...] ở trên chứa đặc điểm địa điểm do hệ thống ghi lại; giữ nguyên các yếu tố cốt lõi trong khi tự do thay đổi chi tiết dựa trên thời gian/mùa/cốt truyện`;
+    }
+
     generateLocationMemoryPrompt() {
         if (!this.settings?.sendLocationMemory) return '';
         const custom = this.settings?.customLocationPrompt;
@@ -4346,11 +4554,12 @@ Scene Memory records a location's core layout and permanent features (architectu
 
         let prompt = '\n' + (this.settings?.customTablesPrompt || this.getDefaultTablesPrompt());
         const lang = this._getAiOutputLang();
-        const L = (zh, en, ja, ko, ru) => {
+        const L = (zh, en, ja, ko, ru, vi) => {
             if (lang === 'zh-CN' || lang === 'zh-TW') return zh;
             if (lang === 'ja') return ja;
             if (lang === 'ko') return ko;
             if (lang === 'ru') return ru;
+            if (lang === 'vi') return vi || en;
             return en;
         };
 
@@ -4393,6 +4602,7 @@ Scene Memory records a location's core layout and permanent features (architectu
         if (lang === 'ja') return this._getDefaultRelationshipPromptJa(userName);
         if (lang === 'ko') return this._getDefaultRelationshipPromptKo(userName);
         if (lang === 'ru') return this._getDefaultRelationshipPromptRu(userName);
+        if (lang === 'vi') return this._getDefaultRelationshipPromptVi(userName);
         if (lang !== 'zh-CN' && lang !== 'zh-TW') return this._getDefaultRelationshipPromptEn(userName);
         return `═══ 【关系网络】触发条件 ═══
 格式：rel:角色A>角色B=关系类型|备注
@@ -4513,11 +4723,36 @@ System automatically records and displays the relationship network between chara
     rel:${userName}>Элла=лучшие друзья`;
     }
 
+    _getDefaultRelationshipPromptVi(userName) {
+        return `═══ [Mạng lưới Quan hệ] Điều kiện kích hoạt ═══
+Định dạng: rel:NhânVậtA>NhânVậtB=loại quan hệ|ghi chú
+Hệ thống tự động ghi nhận và hiển thị mạng lưới quan hệ giữa các nhân vật. Xuất khi quan hệ thay đổi.
+
+[Khi nào ghi] (chỉ xuất khi đáp ứng bất kỳ điều kiện nào)
+  ✦ Quan hệ mới được thiết lập/xác định giữa hai nhân vật → rel:NhânVậtA>NhânVậtB=loại quan hệ
+  ✦ Quan hệ hiện có thay đổi (đồng nghiệp → bạn bè) → rel:NhânVậtA>NhânVậtB=loại quan hệ mới
+  ✦ Có chi tiết quan trọng về quan hệ cần ghi → thêm |ghi chú
+[Khi nào KHÔNG ghi]
+  ✗ Quan hệ không thay đổi → không ghi
+  ✗ Quan hệ đã ghi mà không có cập nhật → không ghi
+
+[Quy tắc]
+  · NhânVậtA và NhânVậtB phải dùng tên đầy đủ chính xác
+  · Loại quan hệ: thuật ngữ ngắn gọn — bạn bè, người yêu, cấp trên-cấp dưới, thầy-trò, đối thủ, đối tác, v.v.
+  · Trường ghi chú tùy chọn, để ghi các chi tiết đặc biệt về quan hệ
+  · Quan hệ liên quan đến ${userName} cũng phải được ghi
+  Ví dụ:
+    rel:${userName}>Sói=chủ quán-khách hàng|${userName} quản lý quán rượu, Sói là khách quen
+    rel:Sói>Ella=thầm thương|Sói có tình cảm với Ella nhưng chưa thú nhận
+    rel:${userName}>Ella=bạn thân nhất`;
+    }
+
     getDefaultMoodPrompt() {
         const lang = this._getAiOutputLang();
         if (lang === 'ja') return this._getDefaultMoodPromptJa();
         if (lang === 'ko') return this._getDefaultMoodPromptKo();
         if (lang === 'ru') return this._getDefaultMoodPromptRu();
+        if (lang === 'vi') return this._getDefaultMoodPromptVi();
         if (lang !== 'zh-CN' && lang !== 'zh-TW') return this._getDefaultMoodPromptEn();
         return `═══ 【情绪/心理状态追踪】触发条件 ═══
 格式：mood:角色名=情绪状态（简洁词组，如"紧张/不安"、"开心/期待"、"愤怒"、"平静但警惕"）
@@ -4598,6 +4833,22 @@ System tracks emotional changes of present characters to maintain psychological 
   · Записывать эмоции только присутствующих персонажей`;
     }
 
+    _getDefaultMoodPromptVi() {
+        return `═══ [Theo dõi tâm trạng / trạng thái tinh thần] Điều kiện kích hoạt ═══
+Định dạng: mood:tên nhân vật=trạng thái cảm xúc (cụm từ ngắn gọn, ví dụ: "lo lắng/bất an", "vui vẻ/hào hứng", "tức giận", "bình tĩnh nhưng cảnh giác")
+Hệ thống theo dõi thay đổi cảm xúc của các nhân vật có mặt để duy trì sự nhất quán tâm lý.
+
+[Khi nào ghi] (chỉ xuất nếu đáp ứng bất kỳ điều kiện nào)
+  ✦ Cảm xúc nhân vật thay đổi đáng kể (bình tĩnh → tức giận) → mood:tên nhân vật=cảm xúc mới
+  ✦ Nhân vật xuất hiện lần đầu với trạng thái cảm xúc rõ rệt → mood:tên nhân vật=cảm xúc hiện tại
+[Khi nào KHÔNG ghi]
+  ✗ Cảm xúc nhân vật không thay đổi → không ghi
+  ✗ Nhân vật không có mặt → không ghi
+[Quy tắc]
+  · Dùng 1-4 từ cho mô tả cảm xúc, dùng / để phân tách cảm xúc phức hợp
+  · Chỉ ghi cảm xúc của nhân vật có mặt`;
+    }
+
     generateRelationshipPrompt() {
         if (!this.settings?.sendRelationships) return '';
         const custom = this.settings?.customRelationshipPrompt;
@@ -4612,11 +4863,12 @@ System tracks emotional changes of present characters to maintain psychological 
     _generateAntiParaphrasePrompt() {
         if (!this.settings?.antiParaphraseMode) return '';
         const lang = this._getAiOutputLang();
-        const defaults = { 'zh-CN': '主角', 'zh-TW': '主角', 'ja': '主人公', 'ko': '주인공', 'ru': 'протагонист' };
+        const defaults = { 'zh-CN': '主角', 'zh-TW': '主角', 'ja': '主人公', 'ko': '주인공', 'ru': 'протагонист', 'vi': 'nhân vật chính' };
         const userName = this.context?.name1 || (defaults[lang] || 'protagonist');
         if (lang === 'ja') return this._generateAntiParaphrasePromptJa(userName);
         if (lang === 'ko') return this._generateAntiParaphrasePromptKo(userName);
         if (lang === 'ru') return this._generateAntiParaphrasePromptRu(userName);
+        if (lang === 'vi') return this._generateAntiParaphrasePromptVi(userName);
         if (lang !== 'zh-CN' && lang !== 'zh-TW') {
             return `
 ═══ Anti-Paraphrase Mode ═══
@@ -4680,6 +4932,19 @@ Therefore, when writing this turn's <horae> tags, you MUST also include events f
 `;
     }
 
+    _generateAntiParaphrasePromptVi(userName) {
+        return `
+═══ Chế độ Chống Tường Thuật Lại (Anti-Paraphrase) ═══
+Người dùng tự viết hành động/lời thoại của ${userName} trong tin nhắn USER; bạn (AI) KHÔNG lặp lại phần của ${userName}.
+Do đó, khi viết thẻ <horae> cho lượt này, bạn PHẢI bao gồm cả các sự kiện từ "tin nhắn USER ngay trước phản hồi của bạn":
+  ✦ Vật phẩm nhận/tiêu hao trong tin nhắn USER → ghi các dòng item:/item-: tương ứng
+  ✦ Chuyển cảnh trong tin nhắn USER → cập nhật location:
+  ✦ Tương tác NPC/thay đổi thiện cảm trong tin nhắn USER → cập nhật affection:
+  ✦ Tiến triển cốt truyện trong tin nhắn USER → đưa vào tóm tắt <horaeevent>
+  ✦ Tóm lại: <horae> này phải bao gồm TẤT CẢ thay đổi từ cả "tin nhắn USER trước đó" và "phản hồi AI hiện tại của bạn"
+`;
+    }
+
     generateMoodPrompt() {
         if (!this.settings?.sendMood) return '';
         const custom = this.settings?.customMoodPrompt;
@@ -4715,11 +4980,12 @@ Therefore, when writing this turn's <horae> tags, you MUST also include events f
         const sendSh = !!this.settings?.sendRpgStronghold;
         if (!sendBars && !sendSkills && !sendAttrs && !sendEq && !sendRep && !sendLvl && !sendCur && !sendSh) return '';
         const lang = this._getAiOutputLang();
-        const L = (zh, en, ja, ko, ru) => {
+        const L = (zh, en, ja, ko, ru, vi) => {
             if (lang === 'zh-CN' || lang === 'zh-TW') return zh;
             if (lang === 'ja') return ja;
             if (lang === 'ko') return ko;
             if (lang === 'ru') return ru;
+            if (lang === 'vi') return vi || en;
             return en;
         };
         const userName = this.context?.name1 || L('主角', 'protagonist', '主人公', '주인공', 'протагонист');
@@ -5153,6 +5419,9 @@ Therefore, when writing this turn's <horae> tags, you MUST also include events f
         }
         if (lang === 'ru') {
             return `Ваш ответ ДОЛЖЕН заканчиваться ${joined} (всего ${tags.length} тегов).\nОтсутствие любого тега = недопустимо.`;
+        }
+        if (lang === 'vi') {
+            return `Phản hồi của bạn PHẢI kết thúc bằng ${joined} (tổng cộng ${tags.length} thẻ).\nThiếu bất kỳ thẻ nào = không đạt.`;
         }
         return `Your reply MUST end with ${joined} (${tags.length} tags total).\nMissing any tag = unacceptable.`;
     }

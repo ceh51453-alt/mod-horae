@@ -315,62 +315,64 @@ async function getTemplate(name) {
 
 function _getDefaultRpgAttrConfig() {
     const lang = detectEffectiveAiLang(settings);
-    const L = (zh, en, ja, ko, ru) => {
+    const L = (zh, en, ja, ko, ru, vi) => {
         if (lang === 'zh-CN' || lang === 'zh-TW') return zh;
         if (lang === 'ja') return ja;
         if (lang === 'ko') return ko;
         if (lang === 'ru') return ru;
+        if (lang === 'vi') return vi || en;
         return en;
     };
     return [
-        { key: 'str', name: L('力量','Strength','筋力','힘','Сила'), desc: L('物理攻击、负重与近战伤害','Physical attack, carrying capacity & melee damage','物理攻撃、積載量、近接ダメージ','물리 공격, 적재량, 근접 피해','Физическая атака, грузоподъёмность и урон в ближнем бою') },
-        { key: 'dex', name: L('敏捷','Dexterity','器用','민첩','Ловкость'), desc: L('反射、闪避与远程精准','Reflexes, evasion & ranged accuracy','反射、回避、遠距離命中','반사, 회피, 원거리 정확도','Рефлексы, уклонение и точность дальнего боя') },
-        { key: 'con', name: L('体质','Constitution','耐久','체력','Выносливость'), desc: L('生命力、耐久与抗毒','Vitality, endurance & poison resistance','生命力、持久力、毒耐性','생명력, 지구력, 독 저항','Жизненная сила, выносливость и сопротивление ядам') },
-        { key: 'int', name: L('智力','Intelligence','知力','지능','Интеллект'), desc: L('学识、魔法与推理能力','Knowledge, magic & reasoning ability','学識、魔法、推理能力','지식, 마법, 추리 능력','Знания, магия и аналитические способности') },
-        { key: 'wis', name: L('感知','Wisdom','感知','지혜','Мудрость'), desc: L('洞察、直觉与意志力','Insight, intuition & willpower','洞察、直感、意志力','통찰, 직감, 의지력','Проницательность, интуиция и сила воли') },
-        { key: 'cha', name: L('魅力','Charisma','魅力','매력','Харизма'), desc: L('说服、领导与人格魅力','Persuasion, leadership & personal charm','説得、統率、人格的魅力','설득, 리더십, 인격적 매력','Убеждение, лидерство и обаяние') },
+        { key: 'str', name: L('力量','Strength','筋力','힘','Сила','Sức mạnh'), desc: L('物理攻击、负重与近战伤害','Physical attack, carrying capacity & melee damage','物理攻撃、積載量、近接ダメージ','물리 공격, 적재량, 근접 피해','Физическая атака, грузоподъёмность и урон в ближнем бою','Tấn công vật lý, sức chứa & sát thương cận chiến') },
+        { key: 'dex', name: L('敏捷','Dexterity','器用','민첩','Ловкость','Nhanh nhẹn'), desc: L('反射、闪避与远程精准','Reflexes, evasion & ranged accuracy','反射、回避、遠距離命中','반사, 회피, 원거리 정확도','Рефлексы, уклонение и точность дальнего боя','Phản xạ, né tránh & độ chính xác tầm xa') },
+        { key: 'con', name: L('体质','Constitution','耐久','체력','Выносливость','Thể chất'), desc: L('生命力、耐久与抗毒','Vitality, endurance & poison resistance','生命力、持久力、毒耐性','생명력, 지구력, 독 저항','Жизненная сила, выносливость и сопротивление ядам','Sinh lực, sức bền & kháng độc') },
+        { key: 'int', name: L('智力','Intelligence','知力','지능','Интеллект','Trí tuệ'), desc: L('学识、魔法与推理能力','Knowledge, magic & reasoning ability','学識、魔法、推理能力','지식, 마법, 추리 능력','Знания, магия и аналитические способности','Kiến thức, phép thuật & khả năng suy luận') },
+        { key: 'wis', name: L('感知','Wisdom','感知','지혜','Мудрость','Cảm nhận'), desc: L('洞察、直觉与意志力','Insight, intuition & willpower','洞察、直感、意志力','통찰, 직감, 의지력','Проницательность, интуиция и сила воли','Sáng suốt, trực giác & ý chí') },
+        { key: 'cha', name: L('魅力','Charisma','魅力','매력','Харизма','Sức hút'), desc: L('说服、领导与人格魅力','Persuasion, leadership & personal charm','説得、統率、人格的魅力','설득, 리더십, 인격적 매력','Убеждение, лидерство и обаяние','Thuyết phục, lãnh đạo & sức hấp dẫn cá nhân') },
     ];
 }
 
 function _getDefaultEquipTemplates() {
     const lang = detectEffectiveAiLang(settings);
-    const L = (zh, en, ja, ko, ru) => {
+    const L = (zh, en, ja, ko, ru, vi) => {
         if (lang === 'zh-CN' || lang === 'zh-TW') return zh;
         if (lang === 'ja') return ja;
         if (lang === 'ko') return ko;
         if (lang === 'ru') return ru;
+        if (lang === 'vi') return vi || en;
         return en;
     };
-    const S = (zh, en, ja, ko, ru) => ({ name: L(zh, en, ja, ko, ru), maxCount: 1 });
-    const head = S('头部','Head','頭部','머리','Голова');
-    const torso = S('躯干','Torso','胴体','상체','Торс');
-    const hands = S('手部','Hands','手','손','Руки');
-    const belt = S('腰带','Belt','腰','허리띠','Пояс');
-    const legs = S('下身','Legs','脚部','하체','Ноги');
-    const feet = S('足部','Feet','足','발','Обувь');
-    const neck = S('项链','Necklace','ネックレス','목걸이','Ожерелье');
-    const amulet = S('护身符','Amulet','お守り','부적','Амулет');
-    const ring = { name: L('戒指','Ring','指輪','반지','Кольцо'), maxCount: 2 };
-    const tail = S('尾部','Tail','尾','꼬리','Хвост');
-    const wings = S('翅膀','Wings','翼','날개','Крылья');
+    const S = (zh, en, ja, ko, ru, vi) => ({ name: L(zh, en, ja, ko, ru, vi), maxCount: 1 });
+    const head = S('头部','Head','頭部','머리','Голова','Đầu');
+    const torso = S('躯干','Torso','胴体','상체','Торс','Thân');
+    const hands = S('手部','Hands','手','손','Руки','Tay');
+    const belt = S('腰带','Belt','腰','허리띠','Пояс','Thắt lưng');
+    const legs = S('下身','Legs','脚部','하체','Ноги','Chân');
+    const feet = S('足部','Feet','足','발','Обувь','Bàn chân');
+    const neck = S('项链','Necklace','ネックレス','목걸이','Ожерелье','Dây chuyền');
+    const amulet = S('护身符','Amulet','お守り','부적','Амулет','Bùa hộ mệnh');
+    const ring = { name: L('戒指','Ring','指輪','반지','Кольцо','Nhẫn'), maxCount: 2 };
+    const tail = S('尾部','Tail','尾','꼬리','Хвост','Đuôi');
+    const wings = S('翅膀','Wings','翼','날개','Крылья','Cánh');
     return [
-        { name: L('人类','Human','人間','인간','Человек'), slots: [head, torso, hands, belt, legs, feet, neck, amulet, ring] },
-        { name: L('兽人','Orc','獣人','수인','Орк'), slots: [head, torso, hands, belt, legs, feet, tail, neck, ring] },
-        { name: L('翼族','Winged','翼族','날개족','Крылатый'), slots: [head, torso, hands, belt, legs, feet, wings, neck, ring] },
-        { name: L('人马','Centaur','ケンタウロス','켄타우로스','Кентавр'), slots: [
+        { name: L('人类','Human','人間','인간','Человек','Con người'), slots: [head, torso, hands, belt, legs, feet, neck, amulet, ring] },
+        { name: L('兽人','Orc','獣人','수인','Орк','Thú nhân'), slots: [head, torso, hands, belt, legs, feet, tail, neck, ring] },
+        { name: L('翼族','Winged','翼族','날개족','Крылатый','Dực tộc (có cánh)'), slots: [head, torso, hands, belt, legs, feet, wings, neck, ring] },
+        { name: L('人马','Centaur','ケンタウロス','켄타우로스','Кентавр','Nhân mã'), slots: [
             head, torso, hands, belt,
-            { name: L('马甲','Barding','馬鎧','마갑','Конская броня'), maxCount: 1 },
-            { name: L('马蹄铁','Horseshoe','蹄鉄','말굽','Подкова'), maxCount: 4 },
+            { name: L('马甲','Barding','馬鎧','마갑','Конская броня','Giáp ngựa'), maxCount: 1 },
+            { name: L('马蹄铁','Horseshoe','蹄鉄','말굽','Подкова','Móng ngựa'), maxCount: 4 },
             neck, ring,
         ]},
-        { name: L('拉弥亚','Lamia','ラミア','라미아','Ламия'), slots: [
+        { name: L('拉弥亚','Lamia','ラミア','라미아','Ламия','Lamia'), slots: [
             head, torso, hands, belt,
-            { name: L('蛇尾饰','Tail Ornament','尾飾り','꼬리 장식','Украшение хвоста'), maxCount: 1 },
+            { name: L('蛇尾饰','Tail Ornament','尾飾り','꼬리 장식','Украшение хвоста','Trang sức đuôi rắn'), maxCount: 1 },
             neck, amulet, ring,
         ]},
-        { name: L('恶魔','Demon','悪魔','악마','Демон'), slots: [
+        { name: L('恶魔','Demon','悪魔','악마','Демон','Ác quỷ'), slots: [
             head,
-            { name: L('角饰','Horn Ornament','角飾り','뿔 장식','Украшение рогов'), maxCount: 1 },
+            { name: L('角饰','Horn Ornament','角飾り','뿔 장식','Украшение рогов','Trang sức sừng'), maxCount: 1 },
             torso, hands, belt, legs, feet, wings, tail, neck, ring,
         ]},
     ];
@@ -12208,6 +12210,7 @@ function getDefaultBatchPrompt() {
     if (lang === 'ja') return _getDefaultBatchPromptJa();
     if (lang === 'ko') return _getDefaultBatchPromptKo();
     if (lang === 'ru') return _getDefaultBatchPromptRu();
+    if (lang === 'vi') return _getDefaultBatchPromptVi();
     if (lang !== 'zh-CN' && lang !== 'zh-TW') return _getDefaultBatchPromptEn();
     return `你是剧情分析助手。请逐条分析以下对话记录，为每条消息提取【时间】【剧情事件】和【物品变化】。
 
@@ -12369,6 +12372,7 @@ function getDefaultAnalysisPrompt() {
     if (lang === 'ja') return _getDefaultAnalysisPromptJa();
     if (lang === 'ko') return _getDefaultAnalysisPromptKo();
     if (lang === 'ru') return _getDefaultAnalysisPromptRu();
+    if (lang === 'vi') return _getDefaultAnalysisPromptVi();
     if (lang !== 'zh-CN' && lang !== 'zh-TW') return _getDefaultAnalysisPromptEn();
     return `请分析以下文本，提取关键信息并以指定格式输出。核心原则：只提取文本中明确提到的信息，没有的字段不写，禁止编造。
 
@@ -13265,6 +13269,7 @@ function getDefaultCompressPrompt() {
     if (lang === 'ja') return _getDefaultCompressPromptJa();
     if (lang === 'ko') return _getDefaultCompressPromptKo();
     if (lang === 'ru') return _getDefaultCompressPromptRu();
+    if (lang === 'vi') return _getDefaultCompressPromptVi();
     if (lang !== 'zh-CN' && lang !== 'zh-TW') return _getDefaultCompressPromptEn();
     return `=====【事件压缩】=====
 你是剧情压缩助手。请将以下{{count}}条剧情事件压缩为一段简洁的摘要（100-200字），保留关键信息和因果关系。
@@ -13411,6 +13416,7 @@ function getDefaultAutoSummaryPrompt() {
     if (lang === 'ja') return _getDefaultAutoSummaryPromptJa();
     if (lang === 'ko') return _getDefaultAutoSummaryPromptKo();
     if (lang === 'ru') return _getDefaultAutoSummaryPromptRu();
+    if (lang === 'vi') return _getDefaultAutoSummaryPromptVi();
     if (lang !== 'zh-CN' && lang !== 'zh-TW') return _getDefaultAutoSummaryPromptEn();
     return `你是剧情压缩助手。请阅读以下对话记录，将其压缩为一段精炼的剧情摘要（150-300字），保留关键信息和因果关系。
 

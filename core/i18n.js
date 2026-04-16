@@ -22,7 +22,7 @@ let _pluginBasePath = '';
 let _zhFallback = null;
 let _enFallback = null;
 
-const SUPPORTED_LANGS = ['zh-CN', 'zh-TW', 'en', 'ko', 'ja', 'ru'];
+const SUPPORTED_LANGS = ['zh-CN', 'zh-TW', 'en', 'ko', 'ja', 'ru', 'vi'];
 const DEFAULT_LANG = 'en';
 const ZH_LANGS = new Set(['zh-CN', 'zh-TW']);
 
@@ -36,6 +36,7 @@ function _normalizeLang(raw) {
     if (lower.startsWith('ko')) return 'ko';
     if (lower.startsWith('ja')) return 'ja';
     if (lower.startsWith('ru')) return 'ru';
+    if (lower.startsWith('vi')) return 'vi';
     return null;
 }
 
