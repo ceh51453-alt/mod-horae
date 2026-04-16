@@ -19,7 +19,20 @@ import { t, initI18n, getLanguage, isZhLocale, setLanguage, detectEffectiveAiLan
 // 常量定义
 // ============================================
 const EXTENSION_NAME = 'horae';
-const EXTENSION_FOLDER = `third-party/SillyTavern-Horae`;
+
+// Dynamically determine the extension folder name regardless of what the user named it
+let extFolder = 'SillyTavern-Horae';
+try {
+    const url = new URL(import.meta.url);
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length >= 2) {
+        extFolder = parts[parts.length - 2];
+    }
+} catch (e) {
+    console.warn('[Horae] Could not dynamically get extension folder, falling back to default', e);
+}
+
+const EXTENSION_FOLDER = `third-party/${extFolder}`;
 const TEMPLATE_PATH = `${EXTENSION_FOLDER}/assets/templates`;
 const VERSION = '1.11.13';
 
