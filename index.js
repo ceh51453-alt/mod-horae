@@ -14976,11 +14976,12 @@ async function onMessageReceived(messageId) {
 
     if (settings.vectorEnabled && vectorManager.isReady) {
         try {
+            const msg = horaeManager.getChat()[messageId];
             const meta = horaeManager.getMessageMeta(messageId);
-            if (meta) {
-                vectorManager.addMessage(messageId, meta).then(() => {
+            if (meta && msg) {
+                vectorManager.addMessage(messageId, meta, msg).then(() => {
                     _updateVectorStatus();
-                }).catch(err => console.warn('[Horae] 向量索引失败:', err));
+                }).catch(err => console.warn('[Horae] 向量索引更新:', err));
             }
         } catch (err) {
             console.warn('[Horae] 向量处理失败:', err);
@@ -14999,7 +15000,7 @@ async function onMessageReceived(messageId) {
 /**
  * 消息删除时触发 — 重建表格数据
  */
-function onMessageDeleted() {
+function onMessageDeleted(messageId) {
     if (!settings.enabled) return;
     
     horaeManager.rebuildTableData();
@@ -15010,6 +15011,18 @@ function onMessageDeleted() {
     
     refreshAllDisplays();
     renderCustomTablesList();
+
+    if (settings.vectorEnabled && vectorManager.isReady) {
+        try {
+            const ctx = getContext();
+            const chatId = ctx?.chatId || _deriveChatId(ctx);
+            vectorManager.loadChat(chatId, horaeManager.getChat()).then(() => {
+                _updateVectorStatus();
+            }).catch(err => console.warn('[Horae] Lỗi rollback vector:', err));
+        } catch (err) {
+            console.warn('[Horae] Lỗi rollback vector:', err);
+        }
+    }
 }
 
 /**
@@ -15052,9 +15065,10 @@ function onMessageEdited(messageId) {
             }
 
             if (settings.vectorEnabled && vectorManager.isReady) {
+                const msg = horaeManager.getChat()[messageId];
                 const meta = horaeManager.getMessageMeta(messageId);
-                if (meta) {
-                    vectorManager.addMessage(messageId, meta).catch(err =>
+                if (meta && msg) {
+                    vectorManager.addMessage(messageId, meta, msg).catch(err =>
                         console.warn('[Horae] 向量重建失败:', err));
                 }
             }
@@ -15325,6 +15339,18 @@ function onSwipePanel(messageId) {
             horaeManager.rebuildLocationMemory();
             horaeManager.rebuildRpgData();
             getContext().saveChat();
+            
+            if (settings.vectorEnabled && vectorManager.isReady) {
+                try {
+                    const ctx = getContext();
+                    const chatId = ctx?.chatId || _deriveChatId(ctx);
+                    vectorManager.loadChat(chatId, horaeManager.getChat()).then(() => {
+                        _updateVectorStatus();
+                    }).catch(err => console.warn('[Horae] Lỗi đồng bộ swipe vector:', err));
+                } catch (err) {
+                    console.warn('[Horae] Lỗi đồng bộ swipe vector:', err);
+                }
+            }
             
             refreshAllDisplays();
             renderCustomTablesList();

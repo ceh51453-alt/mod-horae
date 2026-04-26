@@ -1071,10 +1071,13 @@ class HoraeManager {
                     e.event?.level === '关键' || e.event?.level === '關鍵' || e.event?.level === '重要' || e.event?.level === '摘要' || e.event?.isSummary
                 );
                 const contextDepth = this.settings?.contextDepth ?? 15;
+                const maxDistance = this.settings?.forgetDistance ?? 150;
+                const currentMsgIndex = this.getChat().length;
                 const normalAll = sortedEvents.filter(e => 
                     (e.event?.level === '一般' || !e.event?.level) && !e.event?.isSummary
                 );
-                const normalEvents = contextDepth === 0 ? [] : normalAll.slice(-contextDepth);
+                const normalEvents = (contextDepth === 0 ? [] : normalAll.slice(-contextDepth))
+                    .filter(e => (currentMsgIndex - (e.messageIndex || 0)) <= maxDistance);
                 
                 const allToShow = [...criticalAndImportant, ...normalEvents]
                     .sort((a, b) => (a.messageIndex || 0) - (b.messageIndex || 0));
@@ -1104,7 +1107,8 @@ class HoraeManager {
                         const timeStr = time ? `${date} ${time}` : date;
                         const relativeDesc = getRelativeDesc(e.timestamp?.story_date);
                         const msgNum = e.messageIndex !== undefined ? `#${e.messageIndex}` : '';
-                        lines.push(`${mark} ${msgNum} ${timeStr}${relativeDesc}: ${e.event.summary}`);
+                        const povTag = (e.event.pov && e.event.pov !== 'objective' && e.event.pov !== 'khách quan' && e.event.pov !== '客观' && e.event.pov !== '客観的') ? ` [POV: ${e.event.pov}]` : '';
+                        lines.push(`${mark} ${msgNum} ${timeStr}${relativeDesc}${povTag}: ${e.event.summary}`);
                     }
                 }
             }
@@ -5565,7 +5569,15 @@ Do đó, khi viết thẻ <horae> cho lượt này, bạn PHẢI bao gồm cả 
             const parts = eventStr.split('|');
             if (parts.length >= 2) {
                 const levelRaw = parts[0].trim();
-                const summary = parts.slice(1).join('|').trim();
+                let pov = 'objective';
+                let summary = '';
+                
+                if (parts.length >= 3) {
+                    pov = parts[1].trim();
+                    summary = parts.slice(2).join('|').trim();
+                } else {
+                    summary = parts.slice(1).join('|').trim();
+                }
                 
                 let level = '一般';
                 if (levelRaw === '关键' || levelRaw === '關鍵' || levelRaw.toLowerCase() === 'critical') {
@@ -5577,6 +5589,7 @@ Do đó, khi viết thẻ <horae> cho lượt này, bạn PHẢI bao gồm cả 
                 result.events.push({
                     is_important: level === '重要' || level === '关键',
                     level: level,
+                    pov: pov,
                     summary: summary
                 });
                 hasAnyData = true;

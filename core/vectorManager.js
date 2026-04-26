@@ -191,33 +191,55 @@ export class VectorManager {
         try {
             await this._openDB();
             const stored = await this._loadAllVectors();
-            const staleKeys = [];
+            
+            const storedByHash = new Map();
             for (const item of stored) {
-                if (item.messageIndex >= chat.length) {
-                    staleKeys.push(item.messageIndex);
-                    continue;
-                }
-                const doc = this.buildVectorDocument(chat[item.messageIndex]?.horae_meta);
-                if (doc && this._hashString(doc) !== item.hash) {
-                    staleKeys.push(item.messageIndex);
-                    continue;
-                }
-                this.vectors.set(item.messageIndex, {
-                    vector: item.vector,
-                    hash: item.hash,
-                    document: item.document,
-                });
-                this._updateTermCounts(item.document, 1);
-                this.totalDocuments++;
+                storedByHash.set(item.hash, item);
             }
-            if (staleKeys.length > 0) {
-                for (const idx of staleKeys) await this._deleteVector(idx);
-                console.log(`[Horae Vector] 清理了 ${staleKeys.length} 条过期/分支外向量`);
+            
+            const usedOldIndices = new Set();
+
+            for (let i = 0; i < chat.length; i++) {
+                const msg = chat[i];
+                const meta = msg?.horae_meta;
+                if (!meta || msg.is_user || meta._skipHorae) continue;
+                
+                const doc = this.buildVectorDocument(meta);
+                if (!doc) continue;
+                
+                const hash = this._hashMessage(msg, doc);
+                const existing = storedByHash.get(hash);
+                
+                if (existing) {
+                    if (existing.messageIndex !== i) {
+                        await this._deleteVector(existing.messageIndex);
+                        await this._saveVector(i, { vector: existing.vector, hash, document: doc });
+                    }
+                    this.vectors.set(i, { vector: existing.vector, hash, document: doc });
+                    this._updateTermCounts(doc, 1);
+                    this.totalDocuments++;
+                    usedOldIndices.add(existing.messageIndex);
+                }
             }
-            console.log(`[Horae Vector] 已加载 ${this.vectors.size} 条向量 (chatId: ${chatId})`);
+            
+            let deletedCount = 0;
+            for (const item of stored) {
+                if (!usedOldIndices.has(item.messageIndex)) {
+                    await this._deleteVector(item.messageIndex);
+                    deletedCount++;
+                }
+            }
+            if (deletedCount > 0) {
+                console.log(`[Horae Vector] Dọn dẹp ${deletedCount} vector cũ/bị lệch index.`);
+            }
+            console.log(`[Horae Vector] Đã đồng bộ ${this.vectors.size} vector (chatId: ${chatId})`);
         } catch (err) {
-            console.warn('[Horae Vector] 加载向量索引失败:', err);
+            console.warn('[Horae Vector] Lỗi đồng bộ vector:', err);
         }
+    }
+
+    _hashMessage(msg, doc) {
+        return this._hashString(doc + (msg.send_date || '') + (msg.mes || ''));
     }
 
     // ========================================
@@ -295,14 +317,14 @@ export class VectorManager {
     // 索引操作
     // ========================================
 
-    async addMessage(messageIndex, meta) {
+    async addMessage(messageIndex, meta, msgObj = null) {
         if (!this.isReady || !this.chatId) return;
         if (meta?._skipHorae) return;
 
         const doc = this.buildVectorDocument(meta);
         if (!doc) return;
 
-        const hash = this._hashString(doc);
+        const hash = msgObj ? this._hashMessage(msgObj, doc) : this._hashString(doc);
         const existing = this.vectors.get(messageIndex);
         if (existing && existing.hash === hash) return;
 
@@ -342,12 +364,12 @@ export class VectorManager {
 
         const tasks = [];
         for (let i = 0; i < chat.length; i++) {
-            const meta = chat[i].horae_meta;
-            if (!meta || chat[i].is_user) continue;
-            if (meta._skipHorae) continue;
+            const msg = chat[i];
+            const meta = msg.horae_meta;
+            if (!meta || msg.is_user || meta._skipHorae) continue;
             const doc = this.buildVectorDocument(meta);
             if (!doc) continue;
-            const hash = this._hashString(doc);
+            const hash = this._hashMessage(msg, doc);
             const existing = this.vectors.get(i);
             if (existing && existing.hash === hash) continue;
             tasks.push({ messageIndex: i, document: doc, hash });
@@ -1230,12 +1252,69 @@ export class VectorManager {
         results.sort((a, b) => b.similarity - a.similarity);
         results = this._deduplicateResults(results).slice(0, topK);
 
-        console.log(`[Horae Vector] 混合搜索结果: ${results.length} 条`);
+        // --- Khuếch tán Đồ thị (Graph Diffusion) ---
+        const chat = horaeManager.getChat();
+        const diffusionMap = new Map();
+        for (const r of results) diffusionMap.set(r.messageIndex, r);
+        
         for (const r of results) {
+            // 1. Lan truyền Thời gian (Temporal Diffusion)
+            for (const offset of [-1, 1]) {
+                const adjIdx = r.messageIndex + offset;
+                if (adjIdx >= 0 && adjIdx < chat.length && !excludeIndices.has(adjIdx) && !diffusionMap.has(adjIdx)) {
+                    const meta = chat[adjIdx].horae_meta;
+                    if (meta && meta.events && meta.events.length > 0) {
+                        diffusionMap.set(adjIdx, {
+                            messageIndex: adjIdx,
+                            similarity: Math.max(0.65, r.similarity - 0.15),
+                            document: meta.events.map(e => e.summary).join(' '),
+                            source: 'diffusion_temporal'
+                        });
+                    }
+                }
+            }
+            
+            // 2. Lan truyền Ngữ nghĩa (Semantic Diffusion)
+            const meta = chat[r.messageIndex]?.horae_meta;
+            if (meta) {
+                const entities = new Set();
+                const metaEvents = meta.events || (meta.event ? [meta.event] : []);
+                metaEvents.forEach(e => { if (e.pov && e.pov !== 'objective') entities.add(e.pov); });
+                if (meta.npcs) Object.keys(meta.npcs).forEach(n => entities.add(n));
+                
+                if (entities.size > 0) {
+                    for (let i = 0; i < chat.length; i++) {
+                        if (excludeIndices.has(i) || diffusionMap.has(i)) continue;
+                        const otherMeta = chat[i].horae_meta;
+                        if (!otherMeta) continue;
+                        let hit = false;
+                        const otherMetaEvents = otherMeta.events || (otherMeta.event ? [otherMeta.event] : []);
+                        otherMetaEvents.forEach(e => { if (e.pov && entities.has(e.pov)) hit = true; });
+                        if (otherMeta.npcs) Object.keys(otherMeta.npcs).forEach(n => { if (entities.has(n)) hit = true; });
+                        
+                        if (hit) {
+                            diffusionMap.set(i, {
+                                messageIndex: i,
+                                similarity: Math.max(0.6, r.similarity - 0.2),
+                                document: otherMetaEvents.map(e => e.summary).join(' ') || '',
+                                source: 'diffusion_semantic'
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        let finalResults = Array.from(diffusionMap.values());
+        finalResults.sort((a, b) => b.similarity - a.similarity);
+        finalResults = this._deduplicateResults(finalResults).slice(0, Math.floor(topK * 1.5));
+
+        console.log(`[Horae Vector] Khuếch tán đồ thị (Graph Diffusion): ${finalResults.length} kết quả`);
+        for (const r of finalResults) {
             console.log(`  #${r.messageIndex} sim=${r.similarity.toFixed(4)} [${r.source}] | ${r.document.substring(0, 80)}`);
         }
 
-        return results;
+        return finalResults;
     }
 
     _buildRecallText(results, currentDate, chat, fullTextCount = 3, fullTextThreshold = 0.9, stripTags = '') {
