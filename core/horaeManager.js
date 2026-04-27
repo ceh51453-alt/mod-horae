@@ -5,7 +5,6 @@
 
 import { parseStoryDate, calculateRelativeTime, calculateDetailedRelativeTime, generateTimeReference, formatRelativeTime, formatFullDateTime } from '../utils/timeUtils.js';
 import { detectEffectiveAiLangIsZh, detectEffectiveAiLang } from './i18n.js';
-import { timeDecayFactor } from './bme/dynamics.js';
 
 /**
  * @typedef {Object} HoraeTimestamp
