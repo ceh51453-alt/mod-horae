@@ -294,6 +294,11 @@ const DEFAULT_SETTINGS = {
     bmeForgetThreshold: 0.5,             // Retention value below which to forget
     bmeScopedMemoryEnabled: true,        // POV vs Objective memory filtering
     bmeStoryTimelineEnabled: true,       // Track story time segments
+    // --- BME Phase 3: LLM Extraction ---
+    bmeExtractionMode: 'llm',           // 'llm' = LLM-powered extraction, 'basic' = legacy syncMetaToGraph, 'hybrid' = both
+    bmeExtractEvery: 3,                  // Run extraction every N AI messages
+    bmeRecallTopK: 15,                   // Number of nodes to retrieve for injection
+    bmeInjectionMaxTokens: 2000,         // Approximate token budget for injection text
 };
 
 // ============================================
@@ -11824,6 +11829,20 @@ function initSettingsEvents() {
         saveSettings();
     });
 
+    // BME Phase 3: LLM Extraction Controls
+    $('#horae-setting-bme-extraction-mode').on('change', function() {
+        settings.bmeExtractionMode = this.value;
+        saveSettings();
+    });
+    $('#horae-setting-bme-extract-every').on('input change', function() {
+        const val = parseInt(this.value);
+        if (val >= 1 && val <= 10) {
+            settings.bmeExtractEvery = val;
+            $('#horae-bme-extract-every-display').text(val);
+            saveSettings();
+        }
+    });
+
     $('#horae-setting-vector-rerank-enabled').on('change', function() {
         settings.vectorRerankEnabled = this.checked;
         saveSettings();
@@ -12154,6 +12173,11 @@ function syncSettingsToUI() {
     $('#horae-setting-bme-compression').prop('checked', settings.bmeCompressionEnabled !== false);
     $('#horae-setting-bme-sleep').prop('checked', settings.bmeSleepEnabled !== false);
     $('#horae-setting-bme-scoped').prop('checked', settings.bmeScopedMemoryEnabled !== false);
+    
+    // BME Phase 3 UI Init
+    $('#horae-setting-bme-extraction-mode').val(settings.bmeExtractionMode || 'llm');
+    $('#horae-setting-bme-extract-every').val(settings.bmeExtractEvery ?? 3);
+    $('#horae-bme-extract-every-display').text(settings.bmeExtractEvery ?? 3);
     
     $('#horae-setting-vector-rerank-enabled').prop('checked', !!settings.vectorRerankEnabled);
     $('#horae-vector-rerank-options').toggle(!!settings.vectorRerankEnabled);
@@ -15232,19 +15256,16 @@ async function onMessageReceived(messageId) {
         }, 1500);
     }
 
-    // BME Node Ingestion — sync Horae parsed meta → BME graph nodes
+    // BME Extraction — LLM-powered or legacy sync-based node ingestion
     if (!isRegenerate && settings.bmeEnabled) {
-        try {
-            const chat = horaeManager.getChat();
-            const graph = await loadGraphFromChat(chat, { useIdb: true, chatId: getContext()?.chatId });
-            const syncResult = syncMetaToGraph(graph, chat, messageId, settings);
-            if (syncResult.nodesCreated > 0 || syncResult.edgesCreated > 0) {
-                await saveGraphToChat(chat, graph, { useIdb: true, chatId: getContext()?.chatId });
-                console.log(`[Horae BME] Ingested msg #${messageId}: ${syncResult.nodesCreated} nodes, ${syncResult.edgesCreated} edges created`);
+        bmeExtractionController(
+            horaeManager.getChat(),
+            settings,
+            {
+                chatId: getContext()?.chatId,
+                saveChat: async () => await getContext().saveChat(),
             }
-        } catch (err) {
-            console.warn('[Horae] BME ingestion error:', err);
-        }
+        ).catch(err => console.warn('[Horae] BME extraction error:', err));
     }
 
     // BME Cognitive Maintenance (Consolidation + Compression + Forgetting)
@@ -19289,6 +19310,511 @@ function _nodeFieldsToText(node) {
   return parts.join(": ").trim();
 }
 
+// ==============================================================================
+// core/bme/bme-extraction.js — LLM-powered Memory Extraction Pipeline
+// Analyzes chat messages → extracts structured operations → mutates graph
+// Ported from ST-BME extractor.js, adapted for Horae monolithic architecture
+// ==============================================================================
+var LOG_PREFIX_EXTRACT = "[Horae BME Extract]";
+var _bmeExtractCounter = 0; // Counts AI messages since last extraction
+
+/**
+ * Build the LLM extraction prompt containing:
+ * 1. System instructions with graph schema reference
+ * 2. Existing node snapshots (so LLM can update instead of duplicate)
+ * 3. Recent conversation transcript
+ */
+function buildBmeExtractionPrompt(graph, chat, settings = {}) {
+  const activeNodes = getActiveNodes(graph);
+  const chatLen = chat?.length || 0;
+
+  // --- Build schema reference ---
+  const schemaRef = DEFAULT_NODE_SCHEMA.map(s => {
+    const cols = s.columns.map(c => c.name).join(', ');
+    const flags = [];
+    if (s.latestOnly) flags.push('latestOnly');
+    if (s.alwaysInject) flags.push('alwaysInject');
+    return `- ${s.id}: fields=[${cols}]${flags.length ? ' (' + flags.join(', ') + ')' : ''}`;
+  }).join('\n');
+
+  // --- Build existing node snapshots (for update awareness) ---
+  const nodeSnapshots = [];
+  const nodesByType = new Map();
+  for (const node of activeNodes) {
+    if (!nodesByType.has(node.type)) nodesByType.set(node.type, []);
+    nodesByType.get(node.type).push(node);
+  }
+  for (const [type, nodes] of nodesByType) {
+    // For latestOnly types, only show the latest version
+    const schema = getSchemaForType(type);
+    const displayNodes = schema?.latestOnly
+      ? nodes.sort((a, b) => (b.seq || 0) - (a.seq || 0)).slice(0, 3)
+      : nodes.slice(-5); // Show last 5 of each type
+    for (const node of displayNodes) {
+      const fieldStr = Object.entries(node.fields || {})
+        .filter(([, v]) => v != null && v !== '')
+        .map(([k, v]) => `${k}="${String(v).slice(0, 100)}"`)
+        .join(', ');
+      const scopeStr = node.scope ? ` scope=${node.scope.ownerType || 'objective'}` : '';
+      nodeSnapshots.push(`  [${node.id}] ${node.type}: ${fieldStr}${scopeStr}`);
+    }
+  }
+
+  // --- Build recent messages transcript ---
+  const extractWindow = Math.min(settings.bmeExtractEvery || 3, 10) * 2; // Double the frequency for context
+  const startIdx = Math.max(0, chatLen - extractWindow);
+  const transcript = [];
+  for (let i = startIdx; i < chatLen; i++) {
+    const msg = chat[i];
+    if (!msg?.mes) continue;
+    const role = msg.is_user ? 'USER' : 'ASSISTANT';
+    const content = msg.mes
+      .replace(/<horae>[\s\S]*?<\/horae>/gi, '')
+      .replace(/<[^>]+>/g, '')
+      .trim()
+      .slice(0, 800);
+    if (content) {
+      transcript.push(`[${role} #${i}]: ${content}`);
+    }
+  }
+
+  // --- Build graph stats ---
+  const typeStats = {};
+  for (const node of activeNodes) {
+    typeStats[node.type] = (typeStats[node.type] || 0) + 1;
+  }
+  const statsStr = Object.entries(typeStats)
+    .map(([t, c]) => `${t}=${c}`)
+    .join(', ');
+
+  const systemPrompt = `You are a cognitive memory extraction system. Analyze the conversation and extract structured memory operations.
+
+## Graph Schema (node types):
+${schemaRef}
+
+## Rules:
+1. Return a JSON object with an "operations" array.
+2. Each operation must have: { "action": "create"|"update"|"delete", "type": "<node_type>", "fields": { ... } }
+3. For "update", include "nodeId": "<existing_node_id>" and only the fields that changed.
+4. For "delete", include "nodeId": "<existing_node_id>".
+5. For character/location nodes (latestOnly=true), prefer UPDATE over CREATE if a node with the same name already exists.
+6. Extract these memory types:
+   - event: Key events, actions, plot developments (include summary, participants, status)
+   - character: Character state changes (traits, state, relationship changes)
+   - location: New or changed locations (state, features, atmosphere)
+   - thread: Ongoing narrative threads/plotlines (title, summary, status=active|resolved|abandoned)
+   - reflection: Meta-insights, recurring patterns, important realizations
+   - pov_memory: Subjective memories from a specific character's perspective (owner, summary, emotion)
+   - rule: World rules, constraints, established lore
+7. Set "importance" (1-10) for each operation. 9-10=critical, 7-8=important, 5-6=normal, 1-4=minor.
+8. Only extract genuinely new or changed information. Do NOT duplicate existing nodes.
+9. For pov_memory, include "scope": { "ownerType": "character"|"user", "ownerName": "<name>" }
+10. Respond ONLY with valid JSON. No markdown, no explanation.
+
+## Existing Nodes (${activeNodes.length} total: ${statsStr}):
+${nodeSnapshots.length > 0 ? nodeSnapshots.join('\n') : '(empty graph)'}`;
+
+  const userPrompt = `## Recent Conversation:
+${transcript.join('\n')}
+
+Analyze the above conversation and extract memory operations. Return JSON:
+{"operations": [...]}`;
+
+  return { systemPrompt, userPrompt };
+}
+
+/**
+ * Parse LLM response into structured extraction operations.
+ * Handles various JSON formats, markdown code blocks, etc.
+ */
+function parseBmeExtractionResponse(rawResponse) {
+  if (!rawResponse || typeof rawResponse !== 'string') return null;
+
+  // Strip markdown code fences if present
+  let cleaned = rawResponse.trim();
+  if (cleaned.startsWith('```json')) {
+    cleaned = cleaned.slice(7);
+  } else if (cleaned.startsWith('```')) {
+    cleaned = cleaned.slice(3);
+  }
+  if (cleaned.endsWith('```')) {
+    cleaned = cleaned.slice(0, -3);
+  }
+  cleaned = cleaned.trim();
+
+  // Attempt JSON parse
+  try {
+    const parsed = JSON.parse(cleaned);
+
+    // Extract operations array from various possible formats
+    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed?.operations)) return parsed.operations;
+    if (Array.isArray(parsed?.items)) return parsed.items;
+    if (Array.isArray(parsed?.nodes)) return parsed.nodes;
+    if (Array.isArray(parsed?.memories)) return parsed.memories;
+    if (Array.isArray(parsed?.results)) return parsed.results;
+    if (Array.isArray(parsed?.extracted)) return parsed.extracted;
+
+    // Single operation object
+    if (parsed?.action && parsed?.type) return [parsed];
+
+    console.warn(`${LOG_PREFIX_EXTRACT} Unexpected JSON structure:`, Object.keys(parsed));
+    return null;
+  } catch (err) {
+    // Try to recover partial JSON (truncated response)
+    try {
+      // Find the last complete object in truncated array
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace > 0) {
+        let truncated = cleaned.slice(0, lastBrace + 1);
+        // Ensure array closure
+        if (!truncated.endsWith(']}')) {
+          truncated += ']}';
+        }
+        // Ensure it starts with valid JSON
+        if (!truncated.startsWith('{') && !truncated.startsWith('[')) {
+          truncated = '{"operations":[' + truncated + ']}';
+        }
+        const recovered = JSON.parse(truncated);
+        const ops = Array.isArray(recovered) ? recovered : recovered?.operations || [];
+        if (ops.length > 0) {
+          console.warn(`${LOG_PREFIX_EXTRACT} Recovered ${ops.length} operations from truncated response`);
+          return ops;
+        }
+      }
+    } catch (_) { /* recovery failed */ }
+
+    console.warn(`${LOG_PREFIX_EXTRACT} JSON parse failed:`, err.message, cleaned.slice(0, 200));
+    return null;
+  }
+}
+
+/**
+ * Apply a single extraction operation to the graph
+ * Returns { action, nodeId, type } for telemetry
+ */
+function applyBmeExtractionOp(graph, op, seq, settings = {}) {
+  const action = String(op?.action || '').toLowerCase();
+  const type = String(op?.type || '').trim();
+  const fields = op?.fields || {};
+  const importance = Math.max(1, Math.min(10, Number(op?.importance) || 5));
+
+  if (!type || !action) return null;
+
+  // Validate type exists in schema
+  const schema = getSchemaForType(type);
+  if (!schema) {
+    console.warn(`${LOG_PREFIX_EXTRACT} Unknown node type: "${type}", skipping`);
+    return null;
+  }
+
+  // --- CREATE ---
+  if (action === 'create') {
+    // For latestOnly types, check if same-name node already exists → convert to update
+    if (schema.latestOnly) {
+      const nameField = fields.name || fields.title || '';
+      if (nameField) {
+        const existing = getActiveNodes(graph).find(n =>
+          n.type === type && !n.archived &&
+          (n.fields?.name === nameField || n.fields?.title === nameField)
+        );
+        if (existing) {
+          // Convert create → update
+          return applyBmeExtractionOp(graph, {
+            action: 'update',
+            type,
+            nodeId: existing.id,
+            fields,
+            importance
+          }, seq, settings);
+        }
+      }
+    }
+
+    // Build scope
+    let scope = null;
+    if (op?.scope?.ownerType) {
+      const ownerType = String(op.scope.ownerType).toLowerCase();
+      const ownerName = String(op.scope.ownerName || '').trim();
+      if (ownerType === 'character' && ownerName) {
+        scope = createPovScope(ownerName);
+      } else if (ownerType === 'user') {
+        scope = createPovScope('user');
+      } else {
+        scope = createObjectiveScope();
+      }
+    } else {
+      scope = createObjectiveScope();
+    }
+
+    // Derive story time
+    const storyTime = settings.bmeStoryTimelineEnabled !== false
+      ? deriveStoryTimeFromHoraeMeta(null, graph, seq)
+      : null;
+
+    const node = createNode({
+      type,
+      fields,
+      seq,
+      importance,
+      scope,
+      storyTime,
+    });
+    addNode(graph, node);
+    return { action: 'create', nodeId: node.id, type };
+  }
+
+  // --- UPDATE ---
+  if (action === 'update') {
+    const nodeId = String(op?.nodeId || '').trim();
+    if (!nodeId) {
+      console.warn(`${LOG_PREFIX_EXTRACT} Update without nodeId, skipping`);
+      return null;
+    }
+    const existingNode = getNode(graph, nodeId);
+    if (!existingNode || existingNode.archived) {
+      console.warn(`${LOG_PREFIX_EXTRACT} Update target not found: ${nodeId}`);
+      return null;
+    }
+
+    // Merge fields
+    let modified = false;
+    for (const [key, value] of Object.entries(fields)) {
+      if (value != null && value !== '' && existingNode.fields[key] !== value) {
+        existingNode.fields[key] = value;
+        modified = true;
+      }
+    }
+    if (importance > (existingNode.importance || 5)) {
+      existingNode.importance = importance;
+      modified = true;
+    }
+    if (modified) {
+      existingNode.updatedAt = Date.now();
+      existingNode.seq = Math.max(existingNode.seq || 0, seq);
+      if (existingNode.seqRange) {
+        existingNode.seqRange[1] = Math.max(existingNode.seqRange[1] || 0, seq);
+      }
+    }
+    return modified ? { action: 'update', nodeId, type } : null;
+  }
+
+  // --- DELETE ---
+  if (action === 'delete') {
+    const nodeId = String(op?.nodeId || '').trim();
+    if (!nodeId) return null;
+    const existingNode = getNode(graph, nodeId);
+    if (!existingNode || existingNode.archived) return null;
+    existingNode.archived = true;
+    existingNode.updatedAt = Date.now();
+    return { action: 'delete', nodeId, type };
+  }
+
+  return null;
+}
+
+/**
+ * Core LLM extraction function:
+ * 1. Build prompt with graph context + recent chat
+ * 2. Call LLM for JSON response
+ * 3. Parse operations
+ * 4. Apply to graph
+ * Returns extraction stats
+ */
+async function bmeExtractMemories(graph, chat, settings = {}) {
+  const t0 = Date.now();
+  const chatLen = chat?.length || 0;
+  const seq = Math.max(0, chatLen - 1);
+
+  // Build prompt
+  const { systemPrompt, userPrompt } = buildBmeExtractionPrompt(graph, chat, settings);
+  console.log(`${LOG_PREFIX_EXTRACT} Built prompt: ${systemPrompt.length} chars (system) + ${userPrompt.length} chars (user)`);
+
+  // Call LLM
+  let rawResponse;
+  try {
+    const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
+    rawResponse = await getContext().generateRaw(fullPrompt, null, false, false);
+  } catch (err) {
+    console.error(`${LOG_PREFIX_EXTRACT} LLM call failed:`, err);
+    return { success: false, error: 'llm_call_failed', reason: err.message };
+  }
+
+  if (!rawResponse || typeof rawResponse !== 'string' || rawResponse.trim().length === 0) {
+    console.warn(`${LOG_PREFIX_EXTRACT} LLM returned empty response`);
+    return { success: false, error: 'empty_response' };
+  }
+
+  // Parse JSON operations
+  const operations = parseBmeExtractionResponse(rawResponse);
+  if (!operations || operations.length === 0) {
+    console.warn(`${LOG_PREFIX_EXTRACT} No valid operations extracted from LLM response`);
+    return { success: false, error: 'no_operations', rawLength: rawResponse.length };
+  }
+
+  console.log(`${LOG_PREFIX_EXTRACT} LLM returned ${operations.length} operations`);
+
+  // Apply operations
+  let created = 0, updated = 0, deleted = 0, skipped = 0;
+  const appliedOps = [];
+
+  for (const op of operations) {
+    try {
+      const result = applyBmeExtractionOp(graph, op, seq, settings);
+      if (result) {
+        appliedOps.push(result);
+        if (result.action === 'create') created++;
+        else if (result.action === 'update') updated++;
+        else if (result.action === 'delete') deleted++;
+      } else {
+        skipped++;
+      }
+    } catch (err) {
+      console.warn(`${LOG_PREFIX_EXTRACT} Op apply error:`, err, op);
+      skipped++;
+    }
+  }
+
+  // Create edges between new nodes (temporal connections)
+  const newNodeIds = appliedOps.filter(o => o.action === 'create').map(o => o.nodeId);
+  let edgesCreated = 0;
+  for (let i = 1; i < newNodeIds.length; i++) {
+    try {
+      const edge = createEdge({
+        sourceId: newNodeIds[i - 1],
+        targetId: newNodeIds[i],
+        type: EDGE_TYPES.TEMPORAL,
+        strength: 0.5,
+      });
+      if (addEdge(graph, edge)) edgesCreated++;
+    } catch (_) { /* non-critical */ }
+  }
+
+  // Connect new event nodes to relevant character/location nodes
+  for (const opResult of appliedOps) {
+    if (opResult.action !== 'create' || opResult.type !== 'event') continue;
+    const eventNode = getNode(graph, opResult.nodeId);
+    if (!eventNode) continue;
+    const participants = String(eventNode.fields?.participants || '').split(',').map(s => s.trim()).filter(Boolean);
+    for (const charName of participants) {
+      const charNode = getActiveNodes(graph).find(n =>
+        n.type === 'character' && !n.archived && n.fields?.name === charName
+      );
+      if (charNode) {
+        try {
+          const edge = createEdge({
+            sourceId: eventNode.id,
+            targetId: charNode.id,
+            type: EDGE_TYPES.INVOLVES,
+            strength: 0.6,
+          });
+          if (addEdge(graph, edge)) edgesCreated++;
+        } catch (_) { /* non-critical */ }
+      }
+    }
+  }
+
+  const elapsed = Date.now() - t0;
+  const stats = { success: true, created, updated, deleted, skipped, edgesCreated, elapsed, operations: operations.length };
+  console.log(`${LOG_PREFIX_EXTRACT} Applied: +${created} nodes, ~${updated} updates, -${deleted} deletes, ${edgesCreated} edges (${elapsed}ms)`);
+  return stats;
+}
+
+/**
+ * Main extraction controller — orchestrates smart trigger + extraction + persistence
+ * Called from the message processing hook
+ */
+async function bmeExtractionController(chat, settings = {}, tools = {}) {
+  if (!settings.bmeEnabled) return;
+
+  const mode = settings.bmeExtractionMode || 'llm';
+  const extractEvery = Math.max(1, settings.bmeExtractEvery || 3);
+  const chatId = tools.chatId || getContext()?.chatId;
+
+  // Increment counter
+  _bmeExtractCounter++;
+
+  // Smart trigger: only run extraction every N messages
+  if (_bmeExtractCounter < extractEvery) {
+    console.log(`${LOG_PREFIX_EXTRACT} Counter ${_bmeExtractCounter}/${extractEvery}, skipping`);
+
+    // In hybrid mode, always run basic sync
+    if (mode === 'hybrid') {
+      try {
+        const graph = await loadGraphFromChat(chat, { useIdb: true, chatId });
+        const messageId = Math.max(0, (chat?.length || 1) - 1);
+        const syncResult = syncMetaToGraph(graph, chat, messageId, settings);
+        if (syncResult.nodesCreated > 0 || syncResult.edgesCreated > 0) {
+          await saveGraphToChat(chat, graph, { useIdb: true, chatId });
+          console.log(`${LOG_PREFIX_EXTRACT} [hybrid/basic] Synced: ${syncResult.nodesCreated} nodes, ${syncResult.edgesCreated} edges`);
+        }
+      } catch (err) {
+        console.warn(`${LOG_PREFIX_EXTRACT} [hybrid/basic] Sync error:`, err);
+      }
+    }
+    return;
+  }
+
+  // Reset counter
+  _bmeExtractCounter = 0;
+
+  try {
+    const graph = await loadGraphFromChat(chat, { useIdb: true, chatId });
+
+    if (mode === 'basic') {
+      // Legacy mode: just run syncMetaToGraph
+      const messageId = Math.max(0, (chat?.length || 1) - 1);
+      const syncResult = syncMetaToGraph(graph, chat, messageId, settings);
+      if (syncResult.nodesCreated > 0 || syncResult.edgesCreated > 0) {
+        await saveGraphToChat(chat, graph, { useIdb: true, chatId });
+        console.log(`${LOG_PREFIX_EXTRACT} [basic] Synced: ${syncResult.nodesCreated} nodes, ${syncResult.edgesCreated} edges`);
+      }
+      return;
+    }
+
+    // LLM or hybrid mode: run full extraction
+    console.log(`${LOG_PREFIX_EXTRACT} Triggered: ${extractEvery} messages reached (mode=${mode})`);
+
+    // In hybrid mode, also run basic sync first
+    if (mode === 'hybrid') {
+      try {
+        const messageId = Math.max(0, (chat?.length || 1) - 1);
+        syncMetaToGraph(graph, chat, messageId, settings);
+      } catch (err) {
+        console.warn(`${LOG_PREFIX_EXTRACT} [hybrid] Basic sync pre-pass error:`, err);
+      }
+    }
+
+    // Run LLM extraction
+    const extractResult = await bmeExtractMemories(graph, chat, settings);
+
+    if (extractResult.success) {
+      // Update lastProcessedSeq
+      graph.lastProcessedSeq = Math.max(graph.lastProcessedSeq || -1, (chat?.length || 1) - 1);
+      await saveGraphToChat(chat, graph, { useIdb: true, chatId });
+      if (tools.saveChat) {
+        try { await tools.saveChat(); } catch (_) { /* non-critical */ }
+      }
+      console.log(`${LOG_PREFIX_EXTRACT} Graph saved after LLM extraction`);
+    } else {
+      // Fallback to basic sync on LLM failure
+      console.warn(`${LOG_PREFIX_EXTRACT} LLM extraction failed (${extractResult.error}), falling back to basic sync`);
+      try {
+        const messageId = Math.max(0, (chat?.length || 1) - 1);
+        const syncResult = syncMetaToGraph(graph, chat, messageId, settings);
+        if (syncResult.nodesCreated > 0 || syncResult.edgesCreated > 0) {
+          await saveGraphToChat(chat, graph, { useIdb: true, chatId });
+          console.log(`${LOG_PREFIX_EXTRACT} [fallback] Synced: ${syncResult.nodesCreated} nodes, ${syncResult.edgesCreated} edges`);
+        }
+      } catch (fallbackErr) {
+        console.warn(`${LOG_PREFIX_EXTRACT} Fallback sync also failed:`, fallbackErr);
+      }
+    }
+  } catch (err) {
+    console.error(`${LOG_PREFIX_EXTRACT} Controller error:`, err);
+  }
+}
+
 // core/bme/bme-retrieval.js — Node-level retrieval + prompt injection
 var LOG_PREFIX_RETRIEVAL = "[Horae BME Retrieval]";
 
@@ -19311,10 +19837,11 @@ function bmeNodeToVectorText(node) {
 }
 
 /**
- * Retrieve ranked BME graph nodes using graph diffusion + vector scoring
+ * Retrieve ranked BME graph nodes using graph diffusion + vector + lexical scoring
+ * Enhanced v2: adds lexical matching, diversity enforcement, scope-bucket sorting
  * @param {object} graph - BME graph
  * @param {object} options - { queryVec, topK, settings, chat }
- * @returns {object[]} - Array of { node, score, source }
+ * @returns {object[]} - Array of { node, score, source, scopeBucket }
  */
 function bmeRetrieve(graph, options = {}) {
   const {
@@ -19329,8 +19856,17 @@ function bmeRetrieve(graph, options = {}) {
   const activeNodes = getActiveNodes(graph);
   if (activeNodes.length === 0) return [];
 
-  // --- Phase 1: Identify seed nodes from recent messages ---
+  // --- Build query text for lexical matching ---
   const chatLen = chat?.length || 0;
+  const queryTexts = [];
+  for (let i = chatLen - 1; i >= Math.max(0, chatLen - 3); i--) {
+    if (chat?.[i]?.mes) {
+      const txt = chat[i].mes.replace(/<horae>[\s\S]*?<\/horae>/gi, '').replace(/<[^>]+>/g, '').trim();
+      if (txt) queryTexts.push(txt.slice(0, 400));
+    }
+  }
+
+  // --- Phase 1: Identify seed nodes from recent messages ---
   const recentWindow = Math.min(5, chatLen);
   const recentSeqs = new Set();
   for (let i = chatLen - 1; i >= Math.max(0, chatLen - recentWindow); i--) {
@@ -19378,7 +19914,59 @@ function bmeRetrieve(graph, options = {}) {
     }
   }
 
-  // --- Phase 4: Hybrid scoring ---
+  // --- Phase 4: Lexical scoring (ported from ST-BME retriever) ---
+  let lexicalScoreMap = new Map();
+  if (queryTexts.length > 0) {
+    for (const node of activeNodes) {
+      const primaryTexts = [];
+      if (node.fields?.name) primaryTexts.push(node.fields.name);
+      if (node.fields?.title) primaryTexts.push(node.fields.title);
+
+      const secondaryTexts = [];
+      if (node.fields?.summary) secondaryTexts.push(node.fields.summary);
+      if (node.fields?.insight) secondaryTexts.push(node.fields.insight);
+      if (node.fields?.state) secondaryTexts.push(node.fields.state);
+      if (node.fields?.traits) secondaryTexts.push(node.fields.traits);
+      if (node.fields?.owner) secondaryTexts.push(node.fields.owner);
+
+      let bestScore = 0;
+
+      // Primary: exact or substring match on name/title
+      for (const primary of primaryTexts) {
+        const normPrimary = primary.toLowerCase().trim();
+        for (const qt of queryTexts) {
+          const normQuery = qt.toLowerCase();
+          if (normQuery.includes(normPrimary) && normPrimary.length >= 2) {
+            bestScore = Math.max(bestScore, 0.9);
+          }
+        }
+      }
+
+      // Secondary: token overlap
+      if (bestScore < 0.9 && secondaryTexts.length > 0) {
+        const nodeText = [...primaryTexts, ...secondaryTexts].join(' ').toLowerCase();
+        const nodeTokens = new Set(nodeText.match(/[\p{L}\p{N}]+/gu) || []);
+        if (nodeTokens.size > 0) {
+          for (const qt of queryTexts) {
+            const queryTokens = qt.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+            if (queryTokens.length === 0) continue;
+            let overlap = 0;
+            for (const tok of queryTokens) {
+              if (tok.length >= 2 && nodeTokens.has(tok)) overlap++;
+            }
+            const overlapScore = (overlap / Math.max(1, Math.min(queryTokens.length, nodeTokens.size))) * 0.6;
+            bestScore = Math.max(bestScore, overlapScore);
+          }
+        }
+      }
+
+      if (bestScore > 0.05) {
+        lexicalScoreMap.set(node.id, bestScore);
+      }
+    }
+  }
+
+  // --- Phase 5: Hybrid scoring with lexical boost ---
   const hybridWeights = {
     graphWeight: settings.bmeGraphWeight ?? 0.6,
     vectorWeight: settings.bmeVectorWeight ?? 0.3,
@@ -19389,39 +19977,71 @@ function bmeRetrieve(graph, options = {}) {
   for (const node of activeNodes) {
     const graphScore = diffusionScoreMap.get(node.id) || 0;
     const vectorScore = vectorScoreMap.get(node.id) || 0;
+    const lexicalScore = lexicalScoreMap.get(node.id) || 0;
 
-    // Always-inject nodes (rules, threads, recent events) get baseline score
+    // Always-inject nodes get baseline score
     const schema = getSchemaForType(node.type);
     const alwaysInject = schema?.alwaysInject === true;
 
-    if (graphScore === 0 && vectorScore === 0 && !alwaysInject) continue;
+    if (graphScore === 0 && vectorScore === 0 && lexicalScore === 0 && !alwaysInject) continue;
 
-    const score = hybridScore({
+    let score = hybridScore({
       graphScore,
       vectorScore,
       importance: node.importance || 5,
       createdTime: node.createdTime || Date.now(),
     }, hybridWeights);
 
-    // Boost always-inject nodes to ensure they appear
+    // Lexical boost: add up to 30% bonus for strong lexical matches
+    if (lexicalScore > 0) {
+      score = score + (lexicalScore * 0.3);
+    }
+
+    // Always-inject floor
     const finalScore = alwaysInject ? Math.max(score, 0.3) : score;
+
+    // Determine scope bucket
+    let scopeBucket = 'objective';
+    if (node.scope?.ownerType === 'character' || node.scope?.ownerType === 'user') {
+      scopeBucket = node.scope.ownerType === 'user' ? 'userPov' : 'characterPov';
+    }
 
     scored.push({
       node,
       score: finalScore,
       graphScore,
       vectorScore,
-      source: graphScore > 0 && vectorScore > 0 ? 'hybrid' : graphScore > 0 ? 'diffusion' : vectorScore > 0 ? 'vector' : 'always_inject',
+      lexicalScore,
+      scopeBucket,
+      source: (graphScore > 0 && vectorScore > 0) ? 'hybrid'
+        : graphScore > 0 ? 'diffusion'
+        : vectorScore > 0 ? 'vector'
+        : lexicalScore > 0 ? 'lexical'
+        : 'always_inject',
     });
   }
 
   // Sort by score descending
   scored.sort((a, b) => b.score - a.score);
 
-  // --- Phase 5: Deduplicate latestOnly types ---
+  // --- Phase 6: Type diversity enforcement ---
+  // Ensure we don't over-represent any single type (max 50% of budget per type)
+  const maxPerType = Math.max(3, Math.ceil(topK * 0.5));
+  const typeCounts = {};
+  const diversified = [];
+
+  for (const entry of scored) {
+    const typeCount = typeCounts[entry.node.type] || 0;
+    if (typeCount >= maxPerType) continue;
+    typeCounts[entry.node.type] = typeCount + 1;
+    diversified.push(entry);
+    if (diversified.length >= topK * 1.5) break; // Over-fetch slightly for dedup
+  }
+
+  // --- Phase 7: Deduplicate latestOnly types ---
   const latestOnlySeen = new Map();
   const deduped = [];
-  for (const entry of scored) {
+  for (const entry of diversified) {
     const schema = getSchemaForType(entry.node.type);
     if (schema?.latestOnly) {
       const key = `${entry.node.type}:${entry.node.fields?.name || entry.node.id}`;
@@ -19441,50 +20061,119 @@ function bmeRetrieve(graph, options = {}) {
 }
 
 /**
- * Format retrieved BME nodes into structured Markdown tables for prompt injection
+ * Format retrieved BME nodes into structured scope-bucketed Markdown tables
+ * Enhanced v2: scope sections (Character POV, User POV, Objective), token budget
  * @param {object[]} retrievedNodes - Output from bmeRetrieve()
+ * @param {object} [options] - { maxTokens }
  * @returns {string} - Formatted injection text
  */
-function bmeFormatInjection(retrievedNodes) {
+function bmeFormatInjection(retrievedNodes, options = {}) {
   if (!Array.isArray(retrievedNodes) || retrievedNodes.length === 0) return "";
 
+  const maxTokens = options.maxTokens || 2000;
   const parts = [];
   const appended = new Set();
 
-  // Group by node type
-  const byType = new Map();
+  // Separate into scope buckets
+  const buckets = {
+    characterPov: [],
+    userPov: [],
+    objective: [],
+  };
   for (const entry of retrievedNodes) {
+    const bucket = entry.scopeBucket || 'objective';
+    if (buckets[bucket]) {
+      buckets[bucket].push(entry);
+    } else {
+      buckets.objective.push(entry);
+    }
+  }
+
+  parts.push("[BME Cognitive Memory — Structured recall from long-term graph]");
+  parts.push("");
+
+  // --- Character POV section ---
+  if (buckets.characterPov.length > 0) {
+    // Group by owner name
+    const byOwner = new Map();
+    for (const entry of buckets.characterPov) {
+      const ownerName = entry.node.scope?.ownerName || entry.node.fields?.owner || 'Unknown';
+      if (!byOwner.has(ownerName)) byOwner.set(ownerName, []);
+      byOwner.get(ownerName).push(entry);
+    }
+    for (const [ownerName, entries] of byOwner) {
+      parts.push(`[Memory - Character POV: ${ownerName}]`);
+      _appendScopedTables(parts, entries, appended);
+      parts.push("");
+    }
+  }
+
+  // --- User POV section ---
+  if (buckets.userPov.length > 0) {
+    parts.push("[Memory - User POV / Not Character Facts]");
+    parts.push("These are subjective user-side memories; they do not mean the character knows these facts.");
+    _appendScopedTables(parts, buckets.userPov, appended);
+    parts.push("");
+  }
+
+  // --- Objective section ---
+  if (buckets.objective.length > 0) {
+    parts.push("[Memory - Objective / World State]");
+    _appendScopedTables(parts, buckets.objective, appended);
+    parts.push("");
+  }
+
+  // Remove trailing empty lines
+  while (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
+
+  let result = parts.join("\n");
+
+  // Token budget check (rough estimate: 1 token ≈ 4 chars)
+  const estimatedTokens = Math.ceil(result.length / 4);
+  if (estimatedTokens > maxTokens && maxTokens > 0) {
+    // Truncate by reducing to fit budget
+    const targetChars = maxTokens * 4;
+    result = result.slice(0, targetChars) + "\n[...truncated to fit token budget]";
+  }
+
+  return result;
+}
+
+/**
+ * Internal helper: append Markdown tables grouped by node type for a scope section
+ */
+function _appendScopedTables(parts, entries, appended) {
+  // Group by type
+  const byType = new Map();
+  for (const entry of entries) {
     const type = entry.node?.type || 'unknown';
     if (!byType.has(type)) byType.set(type, []);
     byType.get(type).push(entry);
   }
 
-  // Order: rules first (always important), then threads, events, characters, locations, rest
+  // Type display order
   const typeOrder = ['rule', 'thread', 'event', 'character', 'location', 'synopsis', 'reflection', 'pov_memory'];
   const orderedTypes = [
     ...typeOrder.filter(t => byType.has(t)),
     ...[...byType.keys()].filter(t => !typeOrder.includes(t)),
   ];
 
-  parts.push("[BME Cognitive Memory — Structured recall from long-term graph]");
-  parts.push("");
-
   for (const typeId of orderedTypes) {
-    const entries = byType.get(typeId);
-    if (!entries?.length) continue;
+    const typeEntries = byType.get(typeId);
+    if (!typeEntries?.length) continue;
 
     const schema = getSchemaForType(typeId);
     if (!schema) continue;
 
     // Get columns that have actual data
     const activeCols = schema.columns.filter(col =>
-      entries.some(e => e.node?.fields?.[col.name] != null && e.node.fields[col.name] !== "")
+      typeEntries.some(e => e.node?.fields?.[col.name] != null && e.node.fields[col.name] !== "")
     );
 
     if (activeCols.length === 0) continue;
 
     // Filter out already-appended nodes
-    const uniqueEntries = entries.filter(e => {
+    const uniqueEntries = typeEntries.filter(e => {
       if (!e.node?.id || appended.has(e.node.id)) return false;
       appended.add(e.node.id);
       return true;
@@ -19515,12 +20204,6 @@ function bmeFormatInjection(retrievedNodes) {
     parts.push(...rows);
     parts.push("");
   }
-
-  // Remove trailing empty lines
-  while (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
-
-  const result = parts.join("\n");
-  return result;
 }
 
 /**
@@ -19579,7 +20262,7 @@ async function bmeRecallForPrompt(chat, settings, vm) {
       return "";
     }
 
-    const injection = bmeFormatInjection(retrieved);
+    const injection = bmeFormatInjection(retrieved, { maxTokens: settings.bmeInjectionMaxTokens || 2000 });
     console.log(`${LOG_PREFIX_RETRIEVAL} Retrieved ${retrieved.length} nodes → ${injection.length} chars injection`);
 
     // Log retrieved nodes for debugging

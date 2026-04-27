@@ -1231,6 +1231,25 @@
                                     </label>
                                     <span class="horae-setting-sub-hint" data-i18n="vector.bmeScopedMemoryHint">Dựa vào góc nhìn hiện tại của người nói (POV, kiến thức môi trường), lọc và tăng quyền ưu tiên cho các vùng ký ức độc quyền.</span>
                                 </div>
+                                <!-- BME Phase 3: LLM Extraction Controls -->
+                                <div class="horae-setting-item" style="margin-top: 8px; border-top: 1px dotted var(--horae-border); padding-top: 8px;">
+                                    <label style="font-weight: bold; margin-bottom: 4px;">
+                                        <i class="fa-solid fa-robot"></i> Chế độ trích xuất ký ức (Extraction Mode)
+                                    </label>
+                                    <span class="horae-setting-sub-hint">Chọn phương thức trích xuất ký ức từ hội thoại vào đồ thị tri thức.</span>
+                                    <select id="horae-setting-bme-extraction-mode" style="width: 100%; margin-top: 4px; padding: 4px 8px; background: var(--horae-bg); border: 1px solid var(--horae-border); border-radius: 4px; color: var(--horae-text);">
+                                        <option value="llm">🧠 LLM (AI phân tích sâu — chính xác nhất)</option>
+                                        <option value="basic">⚡ Basic (Đồng bộ meta — nhanh, không tốn API)</option>
+                                        <option value="hybrid">🔄 Hybrid (Kết hợp Basic + LLM)</option>
+                                    </select>
+                                </div>
+                                <div class="horae-setting-item" style="margin-top: 6px;">
+                                    <label>
+                                        Tần suất trích xuất LLM: mỗi <span id="horae-bme-extract-every-display">3</span> tin nhắn AI
+                                        <input type="range" id="horae-setting-bme-extract-every" min="1" max="10" step="1" value="3" style="width: 100%;">
+                                    </label>
+                                    <span class="horae-setting-sub-hint">Sau mỗi N tin nhắn AI, hệ thống sẽ gọi LLM để phân tích và trích xuất ký ức mới vào đồ thị. Giá trị nhỏ = chính xác hơn nhưng tốn API hơn.</span>
+                                </div>
                                 </div>
                                 
                                 <!-- BME Cognitive Monitor -->
