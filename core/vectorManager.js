@@ -12,7 +12,7 @@ import { hybridScore, reinforceAccessBatch } from './bme/dynamics.js';
 import { buildTemporalAdjacencyMap, getNode } from './bme/graph.js';
 import { loadGraphFromChat, saveGraphToChat, syncMetaToGraph, vectorResultsToSeeds, diffusionResultsToMessages } from './bme/bme-bridge.js';
 import { classifyNodeScopeBucket } from './bme/memory-scope.js';
-import { bucketForStoryTime } from './bme/story-timeline.js';
+import { classifyStoryTemporalBucket, resolveTemporalBucketWeight } from './bme/story-timeline.js';
 import { normalizeGraphCognitiveState } from './bme/knowledge-state.js';
 
 const DB_NAME = 'HoraeVectors';
@@ -1355,7 +1355,8 @@ export class VectorManager {
                 }
 
                 if (settings.bmeStoryTimelineEnabled !== false && graph.knowledgeState?.activeStoryTime && dr.node?.storyTime) {
-                    timelineWeight = bucketForStoryTime(dr.node.storyTime, graph.knowledgeState.activeStoryTime).weight;
+                    const bucket = classifyStoryTemporalBucket(graph, dr.node, graph.knowledgeState.activeStoryTime.segmentId);
+                    timelineWeight = resolveTemporalBucketWeight(bucket, settings);
                 }
 
                 const score = baseScore * scopeWeight * timelineWeight;
