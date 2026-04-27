@@ -1162,41 +1162,41 @@
                             <div class="horae-setting-item" style="margin-top: 8px; border-top: 1px solid var(--horae-border); padding-top: 8px;">
                                 <label data-i18n="vector.bmeEnabled">
                                     <input type="checkbox" id="horae-setting-bme-enabled" checked>
-                                    🧠 BME 认知引擎 (Bionic Memory Ecology)
+                                    🧠 Động cơ nhận thức BME (Bionic Memory Ecology)
                                 </label>
-                                <span class="horae-setting-sub-hint" data-i18n="vector.bmeEnabledHint">启用 BME 图谱引擎，使用 PEDSA 算法进行深度记忆扩散。自动构建事件-角色-地点知识图谱，通过能量传播和混合评分实现更精准的记忆召回。</span>
+                                <span class="horae-setting-sub-hint" data-i18n="vector.bmeEnabledHint">Bật động cơ đồ thị BME, sử dụng thuật toán PEDSA để lan truyền ký ức chuyên sâu. Tự động xây dựng đồ thị tri thức Sự kiện-Nhân vật-Địa điểm, thực hiện hồi tưởng ký ức chính xác hơn thông qua lan truyền năng lượng và chấm điểm hỗn hợp.</span>
                             </div>
                             <div id="horae-bme-options" style="display: none; padding-left: 8px; border-left: 2px solid var(--horae-primary-light); margin-left: 4px;">
                                 <div class="horae-setting-item" style="margin-top: 6px;">
                                     <label data-i18n="vector.bmeDiffusionSteps">
-                                        扩散步数 (Steps): <span id="horae-bme-steps-display">2</span>
+                                        Số bước lan truyền (Steps): <span id="horae-bme-steps-display">2</span>
                                         <input type="range" id="horae-setting-bme-diffusion-steps" min="1" max="4" step="1" value="2" style="width: 100%;">
                                     </label>
-                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeDiffusionStepsHint">PEDSA 算法的扩散步数。步数越多召回范围越广，但可能引入噪音。推荐 2-3。</span>
+                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeDiffusionStepsHint">Số bước lan truyền của thuật toán PEDSA. Số bước càng nhiều, phạm vi hồi tưởng càng rộng nhưng có thể gây nhiễu. Khuyến nghị: 2-3.</span>
                                 </div>
                                 <div class="horae-setting-item" style="margin-top: 6px;">
                                     <label data-i18n="vector.bmeDiffusionDecay">
-                                        衰减因子 (Decay): <span id="horae-bme-decay-display">0.6</span>
+                                        Hệ số suy giảm (Decay): <span id="horae-bme-decay-display">0.6</span>
                                         <input type="range" id="horae-setting-bme-diffusion-decay" min="0.1" max="0.9" step="0.1" value="0.6" style="width: 100%;">
                                     </label>
-                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeDiffusionDecayHint">每步扩散的能量衰减率。越低衰减越快（扩散范围小），越高衰减越慢（扩散范围广）。推荐 0.5-0.7。</span>
+                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeDiffusionDecayHint">Tỷ lệ suy giảm năng lượng mỗi bước. Càng thấp suy giảm càng nhanh (phạm vi nhỏ), càng cao suy giảm càng chậm (phạm vi rộng). Khuyến nghị: 0.5-0.7.</span>
                                 </div>
                                 <div class="horae-setting-item" style="margin-top: 6px;">
-                                    <label data-i18n="vector.bmeWeights" style="font-weight: bold; margin-bottom: 4px;">混合评分权重</label>
-                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeWeightsHint" style="margin-bottom: 6px;">调整图谱能量、向量相似度、节点重要度在最终评分中的占比（三项之和为 1.0）。</span>
+                                    <label data-i18n="vector.bmeWeights" style="font-weight: bold; margin-bottom: 4px;">Trọng số điểm hỗn hợp</label>
+                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeWeightsHint" style="margin-bottom: 6px;">Điều chỉnh tỷ trọng của năng lượng đồ thị, độ tương đồng vector và độ quan trọng của node trong điểm số cuối cùng (tổng 3 mục bằng 1.0).</span>
                                     <div style="display: flex; gap: 8px; align-items: center; margin-top: 4px;">
                                         <div style="flex: 1; text-align: center;">
-                                            <div style="font-size: 11px; opacity: 0.7;" data-i18n="vector.bmeGraphWeight">图谱</div>
+                                            <div style="font-size: 11px; opacity: 0.7;" data-i18n="vector.bmeGraphWeight">Đồ thị</div>
                                             <input type="range" id="horae-setting-bme-graph-weight" min="0" max="1" step="0.05" value="0.6" style="width: 100%;">
                                             <div style="font-size: 12px; font-weight: bold;" id="horae-bme-gw-display">0.60</div>
                                         </div>
                                         <div style="flex: 1; text-align: center;">
-                                            <div style="font-size: 11px; opacity: 0.7;" data-i18n="vector.bmeVectorWeight">向量</div>
+                                            <div style="font-size: 11px; opacity: 0.7;" data-i18n="vector.bmeVectorWeight">Vector</div>
                                             <input type="range" id="horae-setting-bme-vector-weight" min="0" max="1" step="0.05" value="0.3" style="width: 100%;">
                                             <div style="font-size: 12px; font-weight: bold;" id="horae-bme-vw-display">0.30</div>
                                         </div>
                                         <div style="flex: 1; text-align: center;">
-                                            <div style="font-size: 11px; opacity: 0.7;" data-i18n="vector.bmeImportanceWeight">重要度</div>
+                                            <div style="font-size: 11px; opacity: 0.7;" data-i18n="vector.bmeImportanceWeight">Quan trọng</div>
                                             <input type="range" id="horae-setting-bme-importance-weight" min="0" max="1" step="0.05" value="0.1" style="width: 100%;" disabled>
                                             <div style="font-size: 12px; font-weight: bold;" id="horae-bme-iw-display">0.10</div>
                                         </div>
@@ -1206,30 +1206,30 @@
                                 <div class="horae-setting-item" style="margin-top: 8px; border-top: 1px dotted var(--horae-border); padding-top: 8px;">
                                     <label data-i18n="vector.bmeConsolidationEnabled">
                                         <input type="checkbox" id="horae-setting-bme-consolidation" checked>
-                                        Memory Consolidation (自动记忆融合)
+                                        Memory Consolidation (Tự động dung hợp ký ức)
                                     </label>
-                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeConsolidationHint">利用LLM识别并融合重复/冗余节点的知识，不断进化记忆维度，避免同一设定被碎片化。</span>
+                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeConsolidationHint">Sử dụng LLM để nhận diện và dung hợp kiến thức của các node lặp lại/dư thừa, liên tục tiến hóa chiều không gian ký ức, tránh việc một thiết lập bị phân mảnh.</span>
                                 </div>
                                 <div class="horae-setting-item" style="margin-top: 6px;">
                                     <label data-i18n="vector.bmeCompressionEnabled">
                                         <input type="checkbox" id="horae-setting-bme-compression" checked>
-                                        Hierarchical Compression (层级记忆压缩)
+                                        Hierarchical Compression (Nén ký ức phân tầng)
                                     </label>
-                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeCompressionHint">当相似事件节点过多时，自动归纳为上层概要节点，提升上下文利用效率。</span>
+                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeCompressionHint">Khi có quá nhiều node sự kiện tương tự, tự động quy nạp thành node tóm tắt cấp cao hơn, cải thiện hiệu suất sử dụng ngữ cảnh.</span>
                                 </div>
                                 <div class="horae-setting-item" style="margin-top: 6px;">
                                     <label data-i18n="vector.bmeSleepEnabled">
                                         <input type="checkbox" id="horae-setting-bme-sleep" checked>
-                                        SleepGate Forgetting (睡眠代谢门控)
+                                        SleepGate Forgetting (Cổng chuyển hóa giấc ngủ)
                                     </label>
-                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeSleepHint">根据遗忘曲线、重要性和访问频率（保留度）自动代谢不再活跃的冷记忆边缘。</span>
+                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeSleepHint">Dựa theo đường cong lãng quên, độ quan trọng và tần suất truy cập (độ duy trì) để tự động chuyển hóa các ký ức lạnh, không còn hoạt động.</span>
                                 </div>
                                 <div class="horae-setting-item" style="margin-top: 6px;">
                                     <label data-i18n="vector.bmeScopedMemoryEnabled">
                                         <input type="checkbox" id="horae-setting-bme-scoped" checked>
-                                        Scoped Memory Filter (视角分区检索)
+                                        Scoped Memory Filter (Truy xuất phân vùng góc nhìn)
                                     </label>
-                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeScopedMemoryHint">根据当前发言人的视界（POV、环境知识），过滤和提权专属记忆区域。</span>
+                                    <span class="horae-setting-sub-hint" data-i18n="vector.bmeScopedMemoryHint">Dựa vào góc nhìn hiện tại của người nói (POV, kiến thức môi trường), lọc và tăng quyền ưu tiên cho các vùng ký ức độc quyền.</span>
                                 </div>
                                 </div>
                                 
@@ -1246,13 +1246,13 @@
                                         <div>Pending: <span id="horae-bme-stat-events" style="font-weight: bold; color: var(--horae-warning);">0</span></div>
                                     </div>
                                     <div style="display: flex; gap: 6px;">
-                                        <div class="menu_button" id="horae-btn-bme-force-consolidate" style="flex: 1; font-size: 11px; padding: 6px; display: flex; align-items: center; justify-content: center; gap: 4px;" title="手动触发知识图谱融合与层级压缩 (Consolidation & Compression)">
-                                            <i class="fa-solid fa-code-merge"></i> 强制融合
+                                        <div class="menu_button" id="horae-btn-bme-force-consolidate" style="flex: 1; font-size: 11px; padding: 6px; display: flex; align-items: center; justify-content: center; gap: 4px;" title="Kích hoạt thủ công dung hợp đồ thị tri thức & nén phân tầng (Consolidation & Compression)" data-i18n-title="vector.bmeForceConsolidateTitle" data-i18n="vector.bmeForceConsolidate">
+                                            <i class="fa-solid fa-code-merge"></i> Ép Dung Hợp
                                         </div>
-                                        <div class="menu_button" id="horae-btn-bme-force-sleep" style="flex: 1; font-size: 11px; padding: 6px; display: flex; align-items: center; justify-content: center; gap: 4px;" title="手动触发睡眠代谢门控，清理边缘冷记忆 (Sleep Cycle)">
-                                            <i class="fa-solid fa-moon"></i> 强制睡眠
+                                        <div class="menu_button" id="horae-btn-bme-force-sleep" style="flex: 1; font-size: 11px; padding: 6px; display: flex; align-items: center; justify-content: center; gap: 4px;" title="Kích hoạt cổng chuyển hóa giấc ngủ, dọn dẹp ký ức lạnh (Sleep Cycle)" data-i18n-title="vector.bmeForceSleepTitle" data-i18n="vector.bmeForceSleep">
+                                            <i class="fa-solid fa-moon"></i> Ép Ngủ
                                         </div>
-                                        <div class="menu_button" id="horae-btn-bme-view-graph" style="flex: 1; font-size: 11px; padding: 6px; display: flex; align-items: center; justify-content: center; gap: 4px; background: rgba(52, 152, 219, 0.2); border: 1px solid rgba(52, 152, 219, 0.5);" title="打开可视化记忆图谱界面 (View Graph)">
+                                        <div class="menu_button" id="horae-btn-bme-view-graph" style="flex: 1; font-size: 11px; padding: 6px; display: flex; align-items: center; justify-content: center; gap: 4px; background: rgba(52, 152, 219, 0.2); border: 1px solid rgba(52, 152, 219, 0.5);" title="Mở giao diện trực quan đồ thị ký ức (View Graph)" data-i18n-title="vector.bmeViewGraphTitle" data-i18n="vector.bmeViewGraph">
                                             <i class="fa-solid fa-diagram-project"></i> Xem Đồ Thị
                                         </div>
                                     </div>
