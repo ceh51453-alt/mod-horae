@@ -12323,7 +12323,7 @@ async function _initVectorModel() {
             const apiKey = settings.vectorApiKey;
             const apiModel = settings.vectorApiModel;
             if (!apiUrl || !apiKey || !apiModel) {
-                throw new Error('请填写完整的 API 地址、密钥和模型名称');
+                throw new Error('Vui lòng điền đầy đủ URL API, Khóa và tên Model');
             }
             await vectorManager.initApi(apiUrl, apiKey, apiModel);
         } else {
