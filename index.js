@@ -11889,8 +11889,15 @@ function initSettingsEvents() {
         if (ind) { ind.textContent = 'CONSOLIDATING'; ind.style.color = 'var(--horae-warning)'; }
         
         await triggerBmeMaintenance(ctx.chat, settings, {
-            getEmbedding: vectorManager.getEmbedding.bind(vectorManager),
-            callLLM: horaeManager.callLLM.bind(horaeManager),
+            getEmbedding: async (text) => {
+                if (!vectorManager.isReady) return null;
+                const result = await vectorManager._embed([text]);
+                return result?.vectors?.[0] || null;
+            },
+            callLLM: async (systemPrompt, userPrompt) => {
+                const prompt = `${systemPrompt}\n\n${userPrompt}`;
+                return await getContext().generateRaw(prompt, null, false, false);
+            },
             saveChat: null, // manual trigger, user will save
             chatId: _deriveChatId(ctx)
         });
@@ -11909,8 +11916,15 @@ function initSettingsEvents() {
         // We temporarily boost the forget threshold to ensure some forgetting happens for demo/force purposes if we want,
         // but it's safer to just run the normal maintenance cycle.
         await triggerBmeMaintenance(ctx.chat, settings, {
-            getEmbedding: vectorManager.getEmbedding.bind(vectorManager),
-            callLLM: horaeManager.callLLM.bind(horaeManager),
+            getEmbedding: async (text) => {
+                if (!vectorManager.isReady) return null;
+                const result = await vectorManager._embed([text]);
+                return result?.vectors?.[0] || null;
+            },
+            callLLM: async (systemPrompt, userPrompt) => {
+                const prompt = `${systemPrompt}\n\n${userPrompt}`;
+                return await getContext().generateRaw(prompt, null, false, false);
+            },
             saveChat: null,
             chatId: _deriveChatId(ctx)
         });
