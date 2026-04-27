@@ -17362,7 +17362,7 @@ var VectorManager = class {
         };
         this.worker.onerror = (err) => {
           clearTimeout(timeout);
-          reject(new Error(err.message || "Worker \u52A0\u8F7D\u5931\u8D25"));
+          reject(new Error(err.message || "Worker tải thất bại"));
         };
         this.worker.postMessage({ type: "init", data: { model, dtype: dtype || "q8" } });
       });
@@ -17377,7 +17377,7 @@ var VectorManager = class {
           }
         }
       };
-      console.log(`[Horae Vector] \u6A21\u578B\u5DF2\u52A0\u8F7D: ${model} (${this.dimensions}\u7EF4)`);
+      console.log(`[Horae Vector] Đã tải model: ${model} (${this.dimensions}\u7EF4)`);
     } finally {
       this.isLoading = false;
     }
@@ -18591,7 +18591,7 @@ ${rawText}`);
       setTimeout(() => {
         if (this._pendingCallbacks.has(id)) {
           this._pendingCallbacks.delete(id);
-          reject(new Error("Embedding \u8D85\u65F6"));
+          reject(new Error("Embedding quá hạn"));
         }
       }, 3e4);
     });
@@ -18616,12 +18616,12 @@ ${rawText}`);
       }
       const json = await resp.json();
       if (!json.data || !Array.isArray(json.data)) {
-        throw new Error("API \u8FD4\u56DE\u683C\u5F0F\u5F02\u5E38\uFF1A\u7F3A\u5C11 data \u6570\u7EC4");
+        throw new Error("Lỗi định dạng API: thiếu mảng data");
       }
       const vectors = json.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
       return { vectors };
     } catch (err) {
-      console.error("[Horae Vector] API embedding \u5931\u8D25:", err);
+      console.error("[Horae Vector] Lỗi API embedding:", err);
       throw err;
     }
   }
@@ -18633,7 +18633,7 @@ ${rawText}`);
     const baseUrl = (settings.vectorRerankUrl || settings.vectorApiUrl || "").replace(/\/+$/, "");
     const apiKey = settings.vectorRerankKey || settings.vectorApiKey || "";
     const model = settings.vectorRerankModel || "";
-    if (!baseUrl || !model) throw new Error("Rerank API \u5730\u5740\u6216\u6A21\u578B\u672A\u914D\u7F6E");
+    if (!baseUrl || !model) throw new Error("Rerank API chưa được cấu hình URL hoặc Model");
     const endpoint = `${baseUrl}/rerank`;
     console.log(`[Horae Vector] Rerank \u8BF7\u6C42: ${documents.length} \u6761\u5019\u9009 \u2192 ${endpoint}`);
     const resp = await fetch(endpoint, {
@@ -18656,7 +18656,7 @@ ${rawText}`);
     const json = await resp.json();
     const results = json.results || json.data;
     if (!Array.isArray(results)) {
-      throw new Error("Rerank API \u8FD4\u56DE\u683C\u5F0F\u5F02\u5E38\uFF1A\u7F3A\u5C11 results \u6570\u7EC4");
+      throw new Error("Lỗi định dạng Rerank API: thiếu mảng results");
     }
     return results.map((r) => ({
       index: r.index,
