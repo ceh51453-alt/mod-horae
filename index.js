@@ -15392,6 +15392,19 @@ async function onPromptReady(eventData) {
             }
         }
 
+        // BME Cognitive Memory Recall — retrieve structured nodes from graph
+        let bmePrompt = '';
+        if (settings.bmeEnabled) {
+            try {
+                bmePrompt = await bmeRecallForPrompt(chat, settings, vectorManager);
+                if (bmePrompt) {
+                    console.log(`[Horae] BME recall: ${bmePrompt.length} ký tự`);
+                }
+            } catch (err) {
+                console.error('[Horae] BME recall thất bại:', err);
+            }
+        }
+
         const rulesPrompt = horaeManager.generateSystemPromptAddition();
 
         let antiParaRef = '';
@@ -15408,8 +15421,10 @@ async function onPromptReady(eventData) {
             }
         }
 
-        const combinedPrompt = recallPrompt
-            ? `${dataPrompt}\n${recallPrompt}${antiParaRef}\n${rulesPrompt}`
+        // Assemble final prompt: data + vector recall + BME recall + anti-paraphrase + rules
+        const recallParts = [recallPrompt, bmePrompt].filter(Boolean).join('\n\n');
+        const combinedPrompt = recallParts
+            ? `${dataPrompt}\n${recallParts}${antiParaRef}\n${rulesPrompt}`
             : `${dataPrompt}${antiParaRef}\n${rulesPrompt}`;
 
         const position = settings.injectionPosition;
@@ -15419,7 +15434,7 @@ async function onPromptReady(eventData) {
             eventData.chat.splice(-position, 0, { role: 'system', content: combinedPrompt });
         }
         
-        console.log(`[Horae] 已注入上下文，位置: -${position}${skipLast ? '（已跳过末尾消息）' : ''}${recallPrompt ? '（含向量召回）' : ''}`);
+        console.log(`[Horae] 已注入上下文，位置: -${position}${skipLast ? '（已跳过末尾消息）' : ''}${recallPrompt ? '（含向量召回）' : ''}${bmePrompt ? '（含BME图谱记忆）' : ''}`);
     } catch (error) {
         console.error('[Horae] 注入上下文失败:', error);
     }
@@ -19272,6 +19287,312 @@ function _nodeFieldsToText(node) {
   if (node.fields.insight) parts.push(node.fields.insight);
   if (node.fields.description) parts.push(node.fields.description);
   return parts.join(": ").trim();
+}
+
+// core/bme/bme-retrieval.js — Node-level retrieval + prompt injection
+var LOG_PREFIX_RETRIEVAL = "[Horae BME Retrieval]";
+
+/**
+ * Build a text representation of a node for vector similarity comparison
+ */
+function bmeNodeToVectorText(node) {
+  if (!node?.fields) return "";
+  const parts = [];
+  if (node.type) parts.push(`[${node.type}]`);
+  if (node.fields.name) parts.push(node.fields.name);
+  if (node.fields.title) parts.push(node.fields.title);
+  if (node.fields.summary) parts.push(node.fields.summary);
+  if (node.fields.state) parts.push(node.fields.state);
+  if (node.fields.insight) parts.push(node.fields.insight);
+  if (node.fields.traits) parts.push(node.fields.traits);
+  if (node.fields.description) parts.push(node.fields.description);
+  if (node.fields.relationship) parts.push(node.fields.relationship);
+  return parts.join(" ").trim().slice(0, 500);
+}
+
+/**
+ * Retrieve ranked BME graph nodes using graph diffusion + vector scoring
+ * @param {object} graph - BME graph
+ * @param {object} options - { queryVec, topK, settings, chat }
+ * @returns {object[]} - Array of { node, score, source }
+ */
+function bmeRetrieve(graph, options = {}) {
+  const {
+    queryVec = null,
+    topK = 15,
+    settings = {},
+    chat = null,
+  } = options;
+
+  if (!graph?.nodes?.length) return [];
+
+  const activeNodes = getActiveNodes(graph);
+  if (activeNodes.length === 0) return [];
+
+  // --- Phase 1: Identify seed nodes from recent messages ---
+  const chatLen = chat?.length || 0;
+  const recentWindow = Math.min(5, chatLen);
+  const recentSeqs = new Set();
+  for (let i = chatLen - 1; i >= Math.max(0, chatLen - recentWindow); i--) {
+    recentSeqs.add(i);
+  }
+
+  const seeds = [];
+  for (const node of activeNodes) {
+    if (recentSeqs.has(node.seq)) {
+      seeds.push({ nodeId: node.id, energy: 1.0 });
+    }
+  }
+
+  // --- Phase 2: Graph diffusion from seeds ---
+  let diffusionScoreMap = new Map();
+  if (seeds.length > 0 && graph.edges?.length > 0) {
+    try {
+      const adjMap = buildTemporalAdjacencyMap(graph);
+      const diffusionResults = diffuseAndRank(adjMap, seeds, {
+        maxSteps: settings.bmeDiffusionSteps ?? 2,
+        decayFactor: settings.bmeDiffusionDecay ?? 0.6,
+        topK: 100,
+      });
+      for (const dr of diffusionResults) {
+        diffusionScoreMap.set(dr.nodeId, dr.energy);
+      }
+    } catch (err) {
+      console.warn(`${LOG_PREFIX_RETRIEVAL} Diffusion error:`, err);
+    }
+  }
+
+  // --- Phase 3: Vector similarity scoring ---
+  let vectorScoreMap = new Map();
+  if (queryVec && Array.isArray(queryVec) && queryVec.length > 0) {
+    for (const node of activeNodes) {
+      if (node.embedding && Array.isArray(node.embedding) && node.embedding.length === queryVec.length) {
+        let dot = 0;
+        for (let i = 0; i < queryVec.length; i++) {
+          dot += queryVec[i] * node.embedding[i];
+        }
+        if (dot > 0.3) {
+          vectorScoreMap.set(node.id, dot);
+        }
+      }
+    }
+  }
+
+  // --- Phase 4: Hybrid scoring ---
+  const hybridWeights = {
+    graphWeight: settings.bmeGraphWeight ?? 0.6,
+    vectorWeight: settings.bmeVectorWeight ?? 0.3,
+    importanceWeight: settings.bmeImportanceWeight ?? 0.1,
+  };
+
+  const scored = [];
+  for (const node of activeNodes) {
+    const graphScore = diffusionScoreMap.get(node.id) || 0;
+    const vectorScore = vectorScoreMap.get(node.id) || 0;
+
+    // Always-inject nodes (rules, threads, recent events) get baseline score
+    const schema = getSchemaForType(node.type);
+    const alwaysInject = schema?.alwaysInject === true;
+
+    if (graphScore === 0 && vectorScore === 0 && !alwaysInject) continue;
+
+    const score = hybridScore({
+      graphScore,
+      vectorScore,
+      importance: node.importance || 5,
+      createdTime: node.createdTime || Date.now(),
+    }, hybridWeights);
+
+    // Boost always-inject nodes to ensure they appear
+    const finalScore = alwaysInject ? Math.max(score, 0.3) : score;
+
+    scored.push({
+      node,
+      score: finalScore,
+      graphScore,
+      vectorScore,
+      source: graphScore > 0 && vectorScore > 0 ? 'hybrid' : graphScore > 0 ? 'diffusion' : vectorScore > 0 ? 'vector' : 'always_inject',
+    });
+  }
+
+  // Sort by score descending
+  scored.sort((a, b) => b.score - a.score);
+
+  // --- Phase 5: Deduplicate latestOnly types ---
+  const latestOnlySeen = new Map();
+  const deduped = [];
+  for (const entry of scored) {
+    const schema = getSchemaForType(entry.node.type);
+    if (schema?.latestOnly) {
+      const key = `${entry.node.type}:${entry.node.fields?.name || entry.node.id}`;
+      if (latestOnlySeen.has(key)) continue;
+      latestOnlySeen.set(key, true);
+    }
+    deduped.push(entry);
+    if (deduped.length >= topK) break;
+  }
+
+  // Reinforce access for retrieved nodes
+  try {
+    reinforceAccessBatch(deduped.map(e => e.node));
+  } catch (_) { /* non-critical */ }
+
+  return deduped;
+}
+
+/**
+ * Format retrieved BME nodes into structured Markdown tables for prompt injection
+ * @param {object[]} retrievedNodes - Output from bmeRetrieve()
+ * @returns {string} - Formatted injection text
+ */
+function bmeFormatInjection(retrievedNodes) {
+  if (!Array.isArray(retrievedNodes) || retrievedNodes.length === 0) return "";
+
+  const parts = [];
+  const appended = new Set();
+
+  // Group by node type
+  const byType = new Map();
+  for (const entry of retrievedNodes) {
+    const type = entry.node?.type || 'unknown';
+    if (!byType.has(type)) byType.set(type, []);
+    byType.get(type).push(entry);
+  }
+
+  // Order: rules first (always important), then threads, events, characters, locations, rest
+  const typeOrder = ['rule', 'thread', 'event', 'character', 'location', 'synopsis', 'reflection', 'pov_memory'];
+  const orderedTypes = [
+    ...typeOrder.filter(t => byType.has(t)),
+    ...[...byType.keys()].filter(t => !typeOrder.includes(t)),
+  ];
+
+  parts.push("[BME Cognitive Memory — Structured recall from long-term graph]");
+  parts.push("");
+
+  for (const typeId of orderedTypes) {
+    const entries = byType.get(typeId);
+    if (!entries?.length) continue;
+
+    const schema = getSchemaForType(typeId);
+    if (!schema) continue;
+
+    // Get columns that have actual data
+    const activeCols = schema.columns.filter(col =>
+      entries.some(e => e.node?.fields?.[col.name] != null && e.node.fields[col.name] !== "")
+    );
+
+    if (activeCols.length === 0) continue;
+
+    // Filter out already-appended nodes
+    const uniqueEntries = entries.filter(e => {
+      if (!e.node?.id || appended.has(e.node.id)) return false;
+      appended.add(e.node.id);
+      return true;
+    });
+
+    if (uniqueEntries.length === 0) continue;
+
+    // Build table
+    const colNames = activeCols.map(c => c.name);
+    const header = `| ${colNames.join(' | ')} |`;
+    const separator = `| ${colNames.map(() => '---').join(' | ')} |`;
+
+    const rows = uniqueEntries.map(entry => {
+      const cells = colNames.map(name => {
+        const val = entry.node.fields?.[name] ?? "";
+        return String(val)
+          .replace(/\|/g, '\\|')
+          .replace(/\n/g, ' ')
+          .slice(0, 200);
+      });
+      return `| ${cells.join(' | ')} |`;
+    });
+
+    const tableLabel = schema.label || typeId;
+    parts.push(`${tableLabel}:`);
+    parts.push(header);
+    parts.push(separator);
+    parts.push(...rows);
+    parts.push("");
+  }
+
+  // Remove trailing empty lines
+  while (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
+
+  const result = parts.join("\n");
+  return result;
+}
+
+/**
+ * Main BME recall entry point — called from onPromptReady
+ * @param {object} chat - Current chat array
+ * @param {object} settings - Horae settings
+ * @param {object} vm - vectorManager instance
+ * @returns {Promise<string>} - Formatted injection text or empty string
+ */
+async function bmeRecallForPrompt(chat, settings, vm) {
+  if (!settings.bmeEnabled) return "";
+
+  try {
+    const graph = await loadGraphFromChat(chat, {
+      useIdb: true,
+      chatId: getContext()?.chatId,
+    });
+
+    if (!graph?.nodes?.length) {
+      console.log(`${LOG_PREFIX_RETRIEVAL} Graph empty, skipping recall`);
+      return "";
+    }
+
+    // Build query vector from recent user message
+    let queryVec = null;
+    if (vm?.isReady) {
+      let userMsg = "";
+      for (let i = chat.length - 1; i >= 0; i--) {
+        if (chat[i].is_user && chat[i].mes) {
+          userMsg = chat[i].mes.replace(/<horae>[\s\S]*?<\/horae>/gi, '').trim();
+          break;
+        }
+      }
+      if (userMsg) {
+        try {
+          const embedResult = await vm._embed([userMsg.slice(0, 500)]);
+          if (embedResult?.vectors?.[0]) {
+            queryVec = embedResult.vectors[0];
+          }
+        } catch (err) {
+          console.warn(`${LOG_PREFIX_RETRIEVAL} Query embedding failed:`, err);
+        }
+      }
+    }
+
+    const topK = settings.bmeRecallTopK ?? 15;
+    const retrieved = bmeRetrieve(graph, {
+      queryVec,
+      topK,
+      settings,
+      chat,
+    });
+
+    if (retrieved.length === 0) {
+      console.log(`${LOG_PREFIX_RETRIEVAL} No nodes retrieved`);
+      return "";
+    }
+
+    const injection = bmeFormatInjection(retrieved);
+    console.log(`${LOG_PREFIX_RETRIEVAL} Retrieved ${retrieved.length} nodes → ${injection.length} chars injection`);
+
+    // Log retrieved nodes for debugging
+    for (const r of retrieved.slice(0, 5)) {
+      const label = r.node.fields?.name || r.node.fields?.title || r.node.fields?.summary || r.node.id;
+      console.log(`  [${r.node.type}] ${String(label).slice(0, 60)} (score=${r.score.toFixed(3)}, src=${r.source})`);
+    }
+
+    return injection;
+  } catch (err) {
+    console.error(`${LOG_PREFIX_RETRIEVAL} Recall error:`, err);
+    return "";
+  }
 }
 
 // core/bme/bme-maintenance.js
