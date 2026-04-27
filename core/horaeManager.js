@@ -5,6 +5,7 @@
 
 import { parseStoryDate, calculateRelativeTime, calculateDetailedRelativeTime, generateTimeReference, formatRelativeTime, formatFullDateTime } from '../utils/timeUtils.js';
 import { detectEffectiveAiLangIsZh, detectEffectiveAiLang } from './i18n.js';
+import { timeDecayFactor } from './bme/dynamics.js';
 
 /**
  * @typedef {Object} HoraeTimestamp
@@ -1084,10 +1085,15 @@ class HoraeManager {
                         // Không lãng quên nếu khoảng cách quá gần (dưới 10 tin nhắn)
                         if (distance <= 10) return true;
                         
-                        // Tính Retention Value
-                        const recency = 1 / (1 + Math.log10(1 + distance / 10)); // Giảm tốc độ log
-                        const accessFreq = (e.event?.accessCount || 0) / Math.max(1, distance / 20);
-                        const retentionValue = 0.5 * recency * (1 + accessFreq);
+                        // BME retention: logarithmic time decay + importance weighting
+                        const createdTime = e.timestamp?.absolute 
+                            ? new Date(e.timestamp.absolute).getTime() 
+                            : (Date.now() - distance * 60000); // fallback: estimate ~1min per msg
+                        const decay = timeDecayFactor(createdTime);
+                        const accessBoost = Math.min(0.5, (e.event?.accessCount || 0) * 0.05);
+                        const importance = (e.event?.level === '关键' || e.event?.level === '關鍵') ? 1.0
+                            : (e.event?.level === '重要') ? 0.7 : 0.3;
+                        const retentionValue = decay * (importance + accessBoost);
                         
                         return retentionValue >= forgetThreshold;
                     });

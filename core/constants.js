@@ -253,5 +253,22 @@ export const DEFAULT_SETTINGS = {
     vectorFullTextCount: 3,
     vectorFullTextThreshold: 0.9,
     vectorStripTags: '',
+    // BME Engine (Bionic Memory Ecology)
+    bmeEnabled: true,                    // BME graph engine master switch
+    bmeDiffusionSteps: 2,                // PEDSA max diffusion steps (1-4)
+    bmeDiffusionDecay: 0.6,              // PEDSA decay factor per step (0.1-0.9)
+    bmeGraphWeight: 0.6,                 // Hybrid score: graph energy weight
+    bmeVectorWeight: 0.3,                // Hybrid score: vector similarity weight
+    bmeImportanceWeight: 0.1,            // Hybrid score: node importance weight
+    
+    // --- BME Phase 2 Cognitive Settings ---
+    bmeConsolidationEnabled: true,       // Auto-merge overlapping memories
+    bmeConsolidationThreshold: 0.85,     // Cosine similarity required to merge
+    bmeCompressionEnabled: true,         // Hierarchical summarization
+    bmeCompressionFanIn: 5,              // Number of events to compress into 1
+    bmeSleepEnabled: true,               // Active forgetting (SleepGate)
+    bmeForgetThreshold: 0.5,             // Retention value below which to forget
+    bmeScopedMemoryEnabled: true,        // POV vs Objective memory filtering
+    bmeStoryTimelineEnabled: true,       // Track story time segments
 };
 

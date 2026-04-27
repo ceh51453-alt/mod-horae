@@ -14,6 +14,7 @@ import { horaeManager, createEmptyMeta, getItemBaseName } from './core/horaeMana
 import { vectorManager } from './core/vectorManager.js';
 import { calculateRelativeTime, calculateDetailedRelativeTime, formatRelativeTime, generateTimeReference, getCurrentSystemTime, formatStoryDate, formatFullDateTime, parseStoryDate } from './utils/timeUtils.js';
 import { t, initI18n, getLanguage, isZhLocale, setLanguage, detectEffectiveAiLangIsZh, detectEffectiveAiLang } from './core/i18n.js';
+import { triggerBmeMaintenance } from './core/bme/bme-maintenance.js';
 
 // ============================================
 // 常量定义
@@ -270,6 +271,23 @@ const DEFAULT_SETTINGS = {
     vectorFullTextCount: 3,
     vectorFullTextThreshold: 0.9,
     vectorStripTags: '',
+    // BME Engine (Bionic Memory Ecology)
+    bmeEnabled: true,                    // BME graph engine master switch
+    bmeDiffusionSteps: 2,                // PEDSA max diffusion steps (1-4)
+    bmeDiffusionDecay: 0.6,              // PEDSA decay factor per step (0.1-0.9)
+    bmeGraphWeight: 0.6,                 // Hybrid score: graph energy weight
+    bmeVectorWeight: 0.3,                // Hybrid score: vector similarity weight
+    bmeImportanceWeight: 0.1,            // Hybrid score: node importance weight
+    
+    // --- BME Phase 2 Cognitive Settings ---
+    bmeConsolidationEnabled: true,       // Auto-merge overlapping memories
+    bmeConsolidationThreshold: 0.85,     // Cosine similarity required to merge
+    bmeCompressionEnabled: true,         // Hierarchical summarization
+    bmeCompressionFanIn: 5,              // Number of events to compress into 1
+    bmeSleepEnabled: true,               // Active forgetting (SleepGate)
+    bmeForgetThreshold: 0.5,             // Retention value below which to forget
+    bmeScopedMemoryEnabled: true,        // POV vs Objective memory filtering
+    bmeStoryTimelineEnabled: true,       // Track story time segments
 };
 
 // ============================================
@@ -11735,6 +11753,75 @@ function initSettingsEvents() {
         saveSettings();
     });
 
+    // --- BME Engine Controls ---
+    $('#horae-setting-bme-enabled').on('change', function() {
+        settings.bmeEnabled = this.checked;
+        saveSettings();
+        $('#horae-bme-options').toggle(this.checked);
+    });
+
+    $('#horae-setting-bme-diffusion-steps').on('input change', function() {
+        const val = parseInt(this.value);
+        if (val >= 1 && val <= 4) {
+            settings.bmeDiffusionSteps = val;
+            $('#horae-bme-steps-display').text(val);
+            saveSettings();
+        }
+    });
+
+    $('#horae-setting-bme-diffusion-decay').on('input change', function() {
+        const val = parseFloat(this.value);
+        if (val >= 0.1 && val <= 0.9) {
+            settings.bmeDiffusionDecay = val;
+            $('#horae-bme-decay-display').text(val.toFixed(1));
+            saveSettings();
+        }
+    });
+
+    $('#horae-setting-bme-graph-weight').on('input change', function() {
+        const val = parseFloat(this.value);
+        settings.bmeGraphWeight = val;
+        const remain = Math.max(0, 1 - val);
+        const vecRatio = settings.bmeVectorWeight / Math.max(0.01, settings.bmeVectorWeight + settings.bmeImportanceWeight);
+        settings.bmeVectorWeight = +(remain * vecRatio).toFixed(2);
+        settings.bmeImportanceWeight = +(remain - settings.bmeVectorWeight).toFixed(2);
+        $('#horae-bme-gw-display').text(val.toFixed(2));
+        $('#horae-setting-bme-vector-weight').val(settings.bmeVectorWeight);
+        $('#horae-bme-vw-display').text(settings.bmeVectorWeight.toFixed(2));
+        $('#horae-setting-bme-importance-weight').val(settings.bmeImportanceWeight);
+        $('#horae-bme-iw-display').text(settings.bmeImportanceWeight.toFixed(2));
+        saveSettings();
+    });
+
+    $('#horae-setting-bme-vector-weight').on('input change', function() {
+        const val = parseFloat(this.value);
+        const maxAllowed = Math.max(0, 1 - settings.bmeGraphWeight);
+        settings.bmeVectorWeight = Math.min(val, maxAllowed);
+        settings.bmeImportanceWeight = +(maxAllowed - settings.bmeVectorWeight).toFixed(2);
+        $('#horae-bme-vw-display').text(settings.bmeVectorWeight.toFixed(2));
+        $('#horae-setting-bme-importance-weight').val(settings.bmeImportanceWeight);
+        $('#horae-bme-iw-display').text(settings.bmeImportanceWeight.toFixed(2));
+        saveSettings();
+    });
+
+    // BME Phase 2 Toggles
+    $('#horae-setting-bme-consolidation').on('change', function() {
+        settings.bmeConsolidationEnabled = this.checked;
+        saveSettings();
+    });
+    $('#horae-setting-bme-compression').on('change', function() {
+        settings.bmeCompressionEnabled = this.checked;
+        saveSettings();
+    });
+    $('#horae-setting-bme-sleep').on('change', function() {
+        settings.bmeSleepEnabled = this.checked;
+        saveSettings();
+    });
+    $('#horae-setting-bme-scoped').on('change', function() {
+        settings.bmeScopedMemoryEnabled = this.checked;
+        saveSettings();
+    });
+
     $('#horae-setting-vector-rerank-enabled').on('change', function() {
         settings.vectorRerankEnabled = this.checked;
         saveSettings();
@@ -11981,6 +12068,26 @@ function syncSettingsToUI() {
     }
     $('#horae-setting-vector-pure-mode').prop('checked', !!settings.vectorPureMode);
     $('#horae-setting-vector-diffusion').prop('checked', settings.vectorDiffusionEnabled !== false);
+    // BME Engine state refresh
+    $('#horae-setting-bme-enabled').prop('checked', settings.bmeEnabled !== false);
+    $('#horae-bme-options').toggle(settings.bmeEnabled !== false);
+    $('#horae-setting-bme-diffusion-steps').val(settings.bmeDiffusionSteps ?? 2);
+    $('#horae-bme-steps-display').text(settings.bmeDiffusionSteps ?? 2);
+    $('#horae-setting-bme-diffusion-decay').val(settings.bmeDiffusionDecay ?? 0.6);
+    $('#horae-bme-decay-display').text((settings.bmeDiffusionDecay ?? 0.6).toFixed(1));
+    $('#horae-setting-bme-graph-weight').val(settings.bmeGraphWeight ?? 0.6);
+    $('#horae-bme-gw-display').text((settings.bmeGraphWeight ?? 0.6).toFixed(2));
+    $('#horae-setting-bme-vector-weight').val(settings.bmeVectorWeight ?? 0.3);
+    $('#horae-bme-vw-display').text((settings.bmeVectorWeight ?? 0.3).toFixed(2));
+    $('#horae-setting-bme-importance-weight').val(settings.bmeImportanceWeight ?? 0.1);
+    $('#horae-bme-iw-display').text((settings.bmeImportanceWeight ?? 0.1).toFixed(2));
+    
+    // BME Phase 2 UI Init
+    $('#horae-setting-bme-consolidation').prop('checked', settings.bmeConsolidationEnabled !== false);
+    $('#horae-setting-bme-compression').prop('checked', settings.bmeCompressionEnabled !== false);
+    $('#horae-setting-bme-sleep').prop('checked', settings.bmeSleepEnabled !== false);
+    $('#horae-setting-bme-scoped').prop('checked', settings.bmeScopedMemoryEnabled !== false);
+    
     $('#horae-setting-vector-rerank-enabled').prop('checked', !!settings.vectorRerankEnabled);
     $('#horae-vector-rerank-options').toggle(!!settings.vectorRerankEnabled);
     $('#horae-setting-vector-rerank-fulltext').prop('checked', !!settings.vectorRerankFullText);
@@ -15015,6 +15122,29 @@ async function onMessageReceived(messageId) {
                 checkAutoSummary();
             }
         }, 1500);
+    }
+
+    // BME Cognitive Maintenance (Consolidation + Compression + Forgetting)
+    if (!isRegenerate && settings.bmeEnabled) {
+        setTimeout(() => {
+            triggerBmeMaintenance(
+                horaeManager.getChat(),
+                settings,
+                {
+                    chatId: getContext()?.chatId,
+                    saveChat: async () => await getContext().saveChat(),
+                    getEmbedding: async (text) => {
+                        if (!vectorManager.isReady) return null;
+                        const result = await vectorManager._embed([text]);
+                        return result?.vectors?.[0] || null;
+                    },
+                    callLLM: async (systemPrompt, userPrompt) => {
+                        const prompt = `${systemPrompt}\n\n${userPrompt}`;
+                        return await getContext().generateRaw(prompt, null, false, false);
+                    }
+                }
+            ).catch(err => console.warn('[Horae] BME Maintenance lỗi:', err));
+        }, 2000); // Wait 2 seconds so it doesn't block UI or vector indexing
     }
 }
 

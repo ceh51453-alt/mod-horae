@@ -7,6 +7,13 @@
 
 import { calculateDetailedRelativeTime } from '../utils/timeUtils.js';
 import { t2s } from '../utils/zhConvert.js';
+import { diffuseAndRank } from './bme/diffusion.js';
+import { hybridScore, reinforceAccessBatch } from './bme/dynamics.js';
+import { buildTemporalAdjacencyMap, getNode } from './bme/graph.js';
+import { loadGraphFromChat, saveGraphToChat, syncMetaToGraph, vectorResultsToSeeds, diffusionResultsToMessages } from './bme/bme-bridge.js';
+import { classifyNodeScopeBucket } from './bme/memory-scope.js';
+import { bucketForStoryTime } from './bme/story-timeline.js';
+import { normalizeGraphCognitiveState } from './bme/knowledge-state.js';
 
 const DB_NAME = 'HoraeVectors';
 const DB_VERSION = 1;
@@ -1263,73 +1270,140 @@ export class VectorManager {
         results.sort((a, b) => b.similarity - a.similarity);
         results = this._deduplicateResults(results).slice(0, topK);
 
-        // --- Khuếch tán Đồ thị (Graph Diffusion) ---
+        // --- BME PEDSA Graph Diffusion ---
         const chat = horaeManager.getChat();
-        const diffusionMap = new Map();
-        for (const r of results) diffusionMap.set(r.messageIndex, r);
         if (settings.vectorDiffusionEnabled === false) {
             console.log('[Horae Vector] Graph Diffusion: TẮT (bởi cài đặt người dùng)');
             return results;
         }
-        
-        for (const r of results) {
-            // 1. Lan truyền Thời gian (Temporal Diffusion)
-            for (const offset of [-1, 1]) {
-                const adjIdx = r.messageIndex + offset;
-                if (adjIdx >= 0 && adjIdx < chat.length && !excludeIndices.has(adjIdx) && !diffusionMap.has(adjIdx)) {
-                    const meta = chat[adjIdx].horae_meta;
-                    if (meta && meta.events && meta.events.length > 0) {
-                        diffusionMap.set(adjIdx, {
-                            messageIndex: adjIdx,
-                            similarity: Math.max(0.65, r.similarity - 0.15),
-                            document: meta.events.map(e => e.summary).join(' '),
-                            source: 'diffusion_temporal'
-                        });
-                    }
-                }
-            }
-            
-            // 2. Lan truyền Ngữ nghĩa (Semantic Diffusion)
-            const meta = chat[r.messageIndex]?.horae_meta;
-            if (meta) {
-                const entities = new Set();
-                const metaEvents = meta.events || (meta.event ? [meta.event] : []);
-                metaEvents.forEach(e => { if (e.pov && e.pov !== 'objective') entities.add(e.pov); });
-                if (meta.npcs) Object.keys(meta.npcs).forEach(n => entities.add(n));
-                
-                if (entities.size > 0) {
-                    for (let i = 0; i < chat.length; i++) {
-                        if (excludeIndices.has(i) || diffusionMap.has(i)) continue;
-                        const otherMeta = chat[i].horae_meta;
-                        if (!otherMeta) continue;
-                        let hit = false;
-                        const otherMetaEvents = otherMeta.events || (otherMeta.event ? [otherMeta.event] : []);
-                        otherMetaEvents.forEach(e => { if (e.pov && entities.has(e.pov)) hit = true; });
-                        if (otherMeta.npcs) Object.keys(otherMeta.npcs).forEach(n => { if (entities.has(n)) hit = true; });
-                        
-                        if (hit) {
-                            diffusionMap.set(i, {
-                                messageIndex: i,
-                                similarity: Math.max(0.6, r.similarity - 0.2),
-                                document: otherMetaEvents.map(e => e.summary).join(' ') || '',
-                                source: 'diffusion_semantic'
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        
-        let finalResults = Array.from(diffusionMap.values());
-        finalResults.sort((a, b) => b.similarity - a.similarity);
-        finalResults = this._deduplicateResults(finalResults).slice(0, Math.floor(topK * 1.5));
 
-        console.log(`[Horae Vector] Khuếch tán đồ thị (Graph Diffusion): ${finalResults.length} kết quả`);
-        for (const r of finalResults) {
-            console.log(`  #${r.messageIndex} sim=${r.similarity.toFixed(4)} [${r.source}] | ${r.document.substring(0, 80)}`);
+        // Check BME engine toggle
+        if (settings.bmeEnabled === false) {
+            // Fallback: simple diffusion map without BME
+            const diffusionMap = new Map();
+            for (const r of results) diffusionMap.set(r.messageIndex, r);
+            console.log('[Horae Vector] BME Engine: TẮT, dùng kết quả vector thuần');
+            return results;
         }
 
-        return finalResults;
+        try {
+            // 1. Load and sync BME graph
+            const graph = loadGraphFromChat(chat);
+            const syncStats = syncMetaToGraph(graph, chat);
+            if (syncStats.nodesCreated > 0) {
+                console.log(`[Horae BME] Đồng bộ đồ thị: +${syncStats.nodesCreated} nút, +${syncStats.edgesCreated} cạnh (tổng: ${graph.nodes.length} nút, ${graph.edges.length} cạnh)`);
+            }
+
+            // 2. Build adjacency map for PEDSA
+            const adjMap = buildTemporalAdjacencyMap(graph);
+
+            // 3. Convert vector results to seed nodes
+            const seeds = vectorResultsToSeeds(graph, results);
+            if (seeds.length === 0) {
+                console.log('[Horae BME] Không có nút hạt giống nào, bỏ qua khuếch tán');
+                saveGraphToChat(chat, graph);
+                return results;
+            }
+
+            // 4. PEDSA diffusion
+            const diffusionOpts = {
+                maxSteps: settings.bmeDiffusionSteps ?? 2,
+                decayFactor: settings.bmeDiffusionDecay ?? 0.6,
+                topK: 100,
+            };
+            const diffusionResults = diffuseAndRank(adjMap, seeds, diffusionOpts);
+            console.log(`[Horae BME] PEDSA khuếch tán: ${seeds.length} hạt giống → ${diffusionResults.length} nút kích hoạt`);
+
+            // 5. Build vector score lookup for hybrid scoring
+            const vectorScoreByMsg = new Map();
+            for (const r of results) {
+                vectorScoreByMsg.set(r.messageIndex, r.similarity);
+            }
+
+            // 6. Map diffusion results back to messages with hybrid scoring
+            const msgMap = diffusionResultsToMessages(graph, diffusionResults);
+            const hybridWeights = {
+                graphWeight: settings.bmeGraphWeight ?? 0.6,
+                vectorWeight: settings.bmeVectorWeight ?? 0.3,
+                importanceWeight: settings.bmeImportanceWeight ?? 0.1,
+            };
+
+            const finalMap = new Map();
+            // Include original vector results
+            for (const r of results) {
+                finalMap.set(r.messageIndex, { ...r });
+            }
+
+            // Merge PEDSA diffusion results
+            for (const [msgIdx, dr] of msgMap) {
+                if (excludeIndices.has(msgIdx)) continue;
+                const existing = finalMap.get(msgIdx);
+                const vecScore = vectorScoreByMsg.get(msgIdx) || 0;
+                const baseScore = hybridScore({
+                    graphScore: dr.energy,
+                    vectorScore: vecScore,
+                    importance: dr.node?.importance || 5,
+                    createdTime: dr.node?.createdTime || Date.now(),
+                }, hybridWeights);
+
+                let scopeWeight = 1.0;
+                let timelineWeight = 1.0;
+
+                if (settings.bmeScopedMemoryEnabled !== false && graph.knowledgeState) {
+                    const ks = normalizeGraphCognitiveState(graph);
+                    scopeWeight = classifyNodeScopeBucket(dr.node, ks).weight;
+                }
+
+                if (settings.bmeStoryTimelineEnabled !== false && graph.knowledgeState?.activeStoryTime && dr.node?.storyTime) {
+                    timelineWeight = bucketForStoryTime(dr.node.storyTime, graph.knowledgeState.activeStoryTime).weight;
+                }
+
+                const score = baseScore * scopeWeight * timelineWeight;
+
+                const meta = chat[msgIdx]?.horae_meta;
+                const doc = meta?.events?.map(e => e.summary).filter(Boolean).join(' ') || '';
+
+                if (existing) {
+                    // Take the higher score
+                    existing.similarity = Math.max(existing.similarity, score);
+                    existing.source = existing.source + '+bme';
+                } else if (doc) {
+                    finalMap.set(msgIdx, {
+                        messageIndex: msgIdx,
+                        similarity: score,
+                        document: doc,
+                        source: 'bme_diffusion',
+                    });
+                }
+            }
+
+            // 7. Reinforce accessed nodes
+            const accessedNodes = [];
+            for (const r of results) {
+                const nodes = graph.nodes.filter(n => !n.archived && n.seq === r.messageIndex);
+                accessedNodes.push(...nodes);
+            }
+            if (accessedNodes.length > 0) {
+                reinforceAccessBatch(accessedNodes);
+            }
+
+            // 8. Persist updated graph
+            saveGraphToChat(chat, graph);
+
+            let finalResults = Array.from(finalMap.values());
+            finalResults.sort((a, b) => b.similarity - a.similarity);
+            finalResults = this._deduplicateResults(finalResults).slice(0, Math.floor(topK * 1.5));
+
+            console.log(`[Horae BME] Khuếch tán đồ thị (PEDSA): ${finalResults.length} kết quả`);
+            for (const r of finalResults) {
+                console.log(`  #${r.messageIndex} sim=${r.similarity.toFixed(4)} [${r.source}] | ${(r.document || '').substring(0, 80)}`);
+            }
+
+            return finalResults;
+        } catch (err) {
+            console.warn('[Horae BME] Lỗi khuếch tán PEDSA, fallback về kết quả vector:', err);
+            return results;
+        }
     }
 
     _buildRecallText(results, currentDate, chat, fullTextCount = 3, fullTextThreshold = 0.9, stripTags = '') {
