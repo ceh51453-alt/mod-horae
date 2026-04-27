@@ -17,7 +17,7 @@ try {
 
 export const EXTENSION_FOLDER = `third-party/${extFolder}`;
 export const TEMPLATE_PATH = `${EXTENSION_FOLDER}/assets/templates`;
-export const VERSION = '1.12.0';
+export const VERSION = '1.12.1';
 
 // 配套正则规则（自动注入ST原生正则系统）
 export const HORAE_REGEX_RULES = [

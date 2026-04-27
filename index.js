@@ -41,7 +41,7 @@ try {
 
 const EXTENSION_FOLDER = `third-party/${extFolder}`;
 const TEMPLATE_PATH = `${EXTENSION_FOLDER}/assets/templates`;
-const VERSION = '1.12.0';
+const VERSION = '1.12.1';
 
 // 配套正则规则（自动注入ST原生正则系统）
 const HORAE_REGEX_RULES = [
@@ -17322,7 +17322,7 @@ var VectorManager = class {
     this.modelName = model;
     try {
       await this._disposeWorker();
-      const workerUrl = new URL("../utils/embeddingWorker.js", import.meta.url);
+      const workerUrl = new URL("./utils/embeddingWorker.js", import.meta.url);
       this.worker = new Worker(workerUrl, { type: "module" });
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error("\u6A21\u578B\u52A0\u8F7D\u8D85\u65F6\uFF085\u5206\u949F\uFF09")), 3e5);
