@@ -111,6 +111,8 @@
         "advanced": "進階設置",
         "contextDepth": "上下文深度",
         "contextDepthHint": "控制傳送給AI的\"一般\"級別劇情軌跡數量：\n0 = 不傳送一般事件（重要/關鍵照發）\n15 = 傳送最近15條一般事件（預設）\n數字越大傳送越多，Token消耗越高",
+        "forgetThreshold": "Forget Threshold",
+        "forgetThresholdHint": "Controls event forgetting speed (Retention Value):\n0.2 = Default\nHigher = Faster forgetting\nFrequently accessed events resist forgetting.",
         "injectionPosition": "注入位置",
         "injectionPositionHint": "Horae狀態資訊插入到AI提示詞的哪個位置：\n0 = 最末尾（緊貼最新訊息）\n1 = 倒數第二（推薦，給AI留思考空間）\n數字越大越靠前",
         "sendToAi": "傳送給AI的內容",

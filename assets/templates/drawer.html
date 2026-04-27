@@ -575,6 +575,33 @@
                     </div>
                     
                     <div class="horae-setting-item">
+                        <label data-i18n="settings.contextDepth">
+                            一般事件深度
+                            <input type="number" id="horae-setting-context-depth" min="0" max="999" value="15">
+                        </label>
+                        <span class="horae-setting-hint" data-i18n="settings.contextDepthHint">
+                            <i class="fa-solid fa-circle-info"></i>
+                            控制发给AI的“一般”级别事件数量：<br>
+                            0 = 不发一般事件（关键/重要依然发）<br>
+                            15 = 最近15个一般事件（默认）<br>
+                            数值越高，Token消耗越大
+                        </span>
+                    </div>
+                    <div class="horae-setting-item">
+                        <label data-i18n="settings.forgetThreshold">
+                            遗忘阈值
+                            <input type="number" id="horae-setting-forget-threshold" min="0.01" max="1.0" step="0.01" value="0.2">
+                        </label>
+                        <span class="horae-setting-hint" data-i18n="settings.forgetThresholdHint">
+                            <i class="fa-solid fa-circle-info"></i>
+                            控制一般事件被遗忘的速度 (Retention Value)：<br>
+                            0.2 = 默认阈值<br>
+                            数值越高，事件遗忘越快<br>
+                            经常被回忆起的事件(Access Freq)会抵抗遗忘
+                        </span>
+                    </div>
+                    
+                    <div class="horae-setting-item">
                         <div class="horae-section-header horae-collapse-header" id="horae-css-collapse-toggle" data-i18n="settings.customCss" style="border-bottom:none; margin-bottom:0; padding-bottom:0;">
                             自定义CSS
                             <i class="fa-solid fa-chevron-down horae-collapse-icon collapsed"></i>
@@ -1123,6 +1150,13 @@
                                     例：填 <code>snow, theater</code> 会剔除 <code>&lt;snow&gt;...&lt;/snow&gt;</code> 和 <code>&lt;theater&gt;...&lt;/theater&gt;</code>。<br>
                                     HTML 注释 <code>&lt;!-- ... --&gt;</code> 已默认剔除，无需填写。
                                 </span>
+                            </div>
+                            <div class="horae-setting-item" style="margin-top: 4px;">
+                                <label data-i18n="vector.diffusionEnabled">
+                                    <input type="checkbox" id="horae-setting-vector-diffusion" checked>
+                                    启用记忆图谱扩散 (Graph Diffusion)
+                                </label>
+                                <span class="horae-setting-sub-hint" data-i18n="vector.diffusionEnabledHint">激活后，向量检索不仅返回匹配结果，还会自动扩散并召回时间上相邻或语义上关联(同角色POV)的记忆，提供更连贯的上下文。</span>
                             </div>
                             <div class="horae-vector-status">
                                 <span id="horae-vector-status-text" data-i18n="vector.modelNotLoaded">模型未加载</span>

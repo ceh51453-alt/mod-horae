@@ -1267,6 +1267,10 @@ export class VectorManager {
         const chat = horaeManager.getChat();
         const diffusionMap = new Map();
         for (const r of results) diffusionMap.set(r.messageIndex, r);
+        if (settings.vectorDiffusionEnabled === false) {
+            console.log('[Horae Vector] Graph Diffusion: TẮT (bởi cài đặt người dùng)');
+            return results;
+        }
         
         for (const r of results) {
             // 1. Lan truyền Thời gian (Temporal Diffusion)

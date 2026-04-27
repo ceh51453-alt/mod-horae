@@ -131,6 +131,7 @@ const DEFAULT_SETTINGS = {
     injectContext: true,
     showMessagePanel: true,
     contextDepth: 15,
+    forgetThreshold: 0.2,
     injectionPosition: 1,
     lastStoryDate: '',
     lastStoryTime: '',
@@ -263,6 +264,7 @@ const DEFAULT_SETTINGS = {
     vectorRerankModel: '',             // Rerank 模型名称
     vectorRerankUrl: '',               // Rerank API 地址（留空则复用 embedding 地址）
     vectorRerankKey: '',               // Rerank API 密钥（留空则复用 embedding 密钥）
+    vectorDiffusionEnabled: true,      // 启用记忆图谱扩散 (Graph Diffusion)
     vectorTopK: 5,
     vectorThreshold: 0.72,
     vectorFullTextCount: 3,
@@ -10430,6 +10432,17 @@ function initSettingsEvents() {
         updateTokenCounter();
     });
     
+    $('#horae-setting-forget-threshold').on('change', function() {
+        settings.forgetThreshold = parseFloat(this.value);
+        if (isNaN(settings.forgetThreshold) || settings.forgetThreshold < 0.01) settings.forgetThreshold = 0.2;
+        saveSettings();
+        horaeManager.init(getContext(), settings);
+    });
+        saveSettings();
+        horaeManager.init(getContext(), settings);
+        updateTokenCounter();
+    });
+    
     $('#horae-setting-injection-position').on('change', function() {
         settings.injectionPosition = parseInt(this.value) || 1;
         saveSettings();
@@ -11013,7 +11026,7 @@ function initSettingsEvents() {
     // ── Horae 全局配置 导出/导入/重置 ──
     const _SETTINGS_EXPORT_KEYS = [
         'enabled','autoParse','injectContext','showMessagePanel','showTopIcon',
-        'contextDepth','injectionPosition',
+        'contextDepth','forgetThreshold','injectionPosition',
         'sendTimeline','sendCharacters','sendItems',
         'sendLocationMemory','sendRelationships','sendMood',
         'antiParaphraseMode','sideplayMode',
@@ -11024,6 +11037,7 @@ function initSettingsEvents() {
         'rpgEquipmentUserOnly','rpgLevelUserOnly','rpgCurrencyUserOnly','rpgUserOnly',
         'rpgBarConfig','rpgAttributeConfig','rpgAttrViewMode','equipmentTemplates',
         ..._PRESET_PROMPT_KEYS,
+        'vectorDiffusionEnabled',
     ];
 
     $('#horae-settings-export').on('click', () => {
@@ -11716,6 +11730,11 @@ function initSettingsEvents() {
         saveSettings();
     });
 
+    $('#horae-setting-vector-diffusion').on('change', function() {
+        settings.vectorDiffusionEnabled = this.checked;
+        saveSettings();
+    });
+
     $('#horae-setting-vector-rerank-enabled').on('change', function() {
         settings.vectorRerankEnabled = this.checked;
         saveSettings();
@@ -11812,6 +11831,7 @@ function syncSettingsToUI() {
     $('#horae-setting-show-top-icon').prop('checked', settings.showTopIcon !== false);
     $('#horae-ext-show-top-icon').prop('checked', settings.showTopIcon !== false);
     $('#horae-setting-context-depth').val(settings.contextDepth);
+    $('#horae-setting-forget-threshold').val(settings.forgetThreshold ?? 0.2);
     $('#horae-setting-injection-position').val(settings.injectionPosition);
     $('#horae-setting-send-timeline').prop('checked', settings.sendTimeline);
     $('#horae-setting-send-characters').prop('checked', settings.sendCharacters);
@@ -11960,6 +11980,7 @@ function syncSettingsToUI() {
         }
     }
     $('#horae-setting-vector-pure-mode').prop('checked', !!settings.vectorPureMode);
+    $('#horae-setting-vector-diffusion').prop('checked', settings.vectorDiffusionEnabled !== false);
     $('#horae-setting-vector-rerank-enabled').prop('checked', !!settings.vectorRerankEnabled);
     $('#horae-vector-rerank-options').toggle(!!settings.vectorRerankEnabled);
     $('#horae-setting-vector-rerank-fulltext').prop('checked', !!settings.vectorRerankFullText);
