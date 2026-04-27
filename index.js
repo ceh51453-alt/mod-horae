@@ -22,6 +22,8 @@ import { vectorManager } from './core/vectorManager.js';
 import { calculateRelativeTime, calculateDetailedRelativeTime, formatRelativeTime, generateTimeReference, getCurrentSystemTime, formatStoryDate, formatFullDateTime, parseStoryDate } from './utils/timeUtils.js';
 import { t, initI18n, getLanguage, isZhLocale, setLanguage, detectEffectiveAiLangIsZh, detectEffectiveAiLang } from './core/i18n.js';
 import { triggerBmeMaintenance } from './core/bme/bme-maintenance.js';
+import { loadGraphFromChat } from './core/bme/bme-bridge.js';
+import { openGraphModal } from './core/bme/visualizer.js';
 
 // ============================================
 // 常量定义
@@ -11881,6 +11883,57 @@ function initSettingsEvents() {
 
     $('#horae-btn-vector-build').on('click', _buildVectorIndex);
     $('#horae-btn-vector-clear').on('click', _clearVectorIndex);
+    
+    // BME Force Actions
+    $('#horae-btn-bme-force-consolidate').on('click', async function() {
+        const ctx = getContext();
+        if (!ctx || !ctx.chat) return;
+        const ind = document.getElementById('horae-bme-status-indicator');
+        if (ind) { ind.textContent = 'CONSOLIDATING'; ind.style.color = 'var(--horae-warning)'; }
+        
+        await triggerBmeMaintenance(ctx.chat, settings, {
+            getEmbedding: vectorManager.getEmbedding.bind(vectorManager),
+            callLLM: horaeManager.callLLM.bind(horaeManager),
+            saveChat: null, // manual trigger, user will save
+            chatId: _deriveChatId(ctx)
+        });
+        
+        if (ind) { ind.textContent = 'IDLE'; ind.style.color = ''; }
+        _updateBmeStatsUI();
+        toastr.success("BME Consolidation Cycle Complete");
+    });
+
+    $('#horae-btn-bme-force-sleep').on('click', async function() {
+        const ctx = getContext();
+        if (!ctx || !ctx.chat) return;
+        const ind = document.getElementById('horae-bme-status-indicator');
+        if (ind) { ind.textContent = 'SLEEPING'; ind.style.color = 'var(--horae-warning)'; }
+        
+        // We temporarily boost the forget threshold to ensure some forgetting happens for demo/force purposes if we want,
+        // but it's safer to just run the normal maintenance cycle.
+        await triggerBmeMaintenance(ctx.chat, settings, {
+            getEmbedding: vectorManager.getEmbedding.bind(vectorManager),
+            callLLM: horaeManager.callLLM.bind(horaeManager),
+            saveChat: null,
+            chatId: _deriveChatId(ctx)
+        });
+        
+        if (ind) { ind.textContent = 'IDLE'; ind.style.color = ''; }
+        _updateBmeStatsUI();
+        toastr.success("BME Sleep Cycle Complete");
+    });
+
+    $('#horae-btn-bme-view-graph').on('click', async function() {
+        const ctx = getContext();
+        if (!ctx || !ctx.chatId) return;
+        try {
+            const graph = await loadGraphFromChat(ctx.chat, { useIdb: true, chatId: ctx.chatId });
+            await openGraphModal(graph);
+        } catch (err) {
+            console.error('Failed to open BME visual graph', err);
+            toastr.error('Failed to open BME Graph Visualization');
+        }
+    });
 }
 
 /**
@@ -12147,6 +12200,47 @@ function _updateVectorStatus() {
         countEl.textContent = vectorManager.vectors.size > 0
             ? t('ui.vectorIndexCount', {n: vectorManager.vectors.size})
             : '';
+    }
+    
+    // Trigger BME UI update alongside Vector UI
+    _updateBmeStatsUI();
+}
+
+async function _updateBmeStatsUI() {
+    const ctx = getContext();
+    if (!ctx || !ctx.chatId) return;
+    try {
+        const graph = await loadGraphFromChat(ctx.chat, { useIdb: true, chatId: ctx.chatId });
+        const nodes = graph.nodes || [];
+        const edges = graph.edges || [];
+        let activeNodes = 0;
+        let archivedNodes = 0;
+        for (const n of nodes) {
+            if (n.archived) archivedNodes++;
+            else activeNodes++;
+        }
+        
+        // Count events from meta (Pending)
+        let pendingEvents = 0;
+        if (ctx.chat) {
+            for (const msg of ctx.chat) {
+                if (msg.horae_meta && msg.horae_meta.events && !msg.horae_meta.events_consolidated) {
+                    pendingEvents += msg.horae_meta.events.length;
+                }
+            }
+        }
+
+        const nodesEl = document.getElementById('horae-bme-stat-nodes');
+        const edgesEl = document.getElementById('horae-bme-stat-edges');
+        const archivedEl = document.getElementById('horae-bme-stat-archived');
+        const eventsEl = document.getElementById('horae-bme-stat-events');
+
+        if (nodesEl) nodesEl.textContent = activeNodes;
+        if (edgesEl) edgesEl.textContent = edges.length;
+        if (archivedEl) archivedEl.textContent = archivedNodes;
+        if (eventsEl) eventsEl.textContent = pendingEvents;
+    } catch (err) {
+        console.warn('Failed to update BME stats UI', err);
     }
 }
 

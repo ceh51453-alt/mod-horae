@@ -1231,6 +1231,32 @@
                                     </label>
                                     <span class="horae-setting-sub-hint" data-i18n="vector.bmeScopedMemoryHint">根据当前发言人的视界（POV、环境知识），过滤和提权专属记忆区域。</span>
                                 </div>
+                                </div>
+                                
+                                <!-- BME Cognitive Monitor -->
+                                <div class="horae-setting-item" style="margin-top: 10px; padding: 10px; background: rgba(0,0,0,0.2); border: 1px solid var(--horae-border); border-radius: 6px;">
+                                    <div style="font-weight: bold; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
+                                        <span><i class="fa-solid fa-microchip"></i> Cognitive Monitor</span>
+                                        <span id="horae-bme-status-indicator" style="font-size: 11px; opacity: 0.8; padding: 2px 6px; background: rgba(255,255,255,0.1); border-radius: 10px;">IDLE</span>
+                                    </div>
+                                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 11px; opacity: 0.9; margin-bottom: 8px;">
+                                        <div>Nodes: <span id="horae-bme-stat-nodes" style="font-weight: bold;">0</span></div>
+                                        <div>Edges: <span id="horae-bme-stat-edges" style="font-weight: bold;">0</span></div>
+                                        <div>Archived: <span id="horae-bme-stat-archived" style="font-weight: bold; color: var(--horae-text-muted);">0</span></div>
+                                        <div>Pending: <span id="horae-bme-stat-events" style="font-weight: bold; color: var(--horae-warning);">0</span></div>
+                                    </div>
+                                    <div style="display: flex; gap: 6px;">
+                                        <div class="menu_button" id="horae-btn-bme-force-consolidate" style="flex: 1; font-size: 11px; padding: 6px; display: flex; align-items: center; justify-content: center; gap: 4px;" title="手动触发知识图谱融合与层级压缩 (Consolidation & Compression)">
+                                            <i class="fa-solid fa-code-merge"></i> 强制融合
+                                        </div>
+                                        <div class="menu_button" id="horae-btn-bme-force-sleep" style="flex: 1; font-size: 11px; padding: 6px; display: flex; align-items: center; justify-content: center; gap: 4px;" title="手动触发睡眠代谢门控，清理边缘冷记忆 (Sleep Cycle)">
+                                            <i class="fa-solid fa-moon"></i> 强制睡眠
+                                        </div>
+                                        <div class="menu_button" id="horae-btn-bme-view-graph" style="flex: 1; font-size: 11px; padding: 6px; display: flex; align-items: center; justify-content: center; gap: 4px; background: rgba(52, 152, 219, 0.2); border: 1px solid rgba(52, 152, 219, 0.5);" title="打开可视化记忆图谱界面 (View Graph)">
+                                            <i class="fa-solid fa-diagram-project"></i> Xem Đồ Thị
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                             <div class="horae-vector-status">
                                 <span id="horae-vector-status-text" data-i18n="vector.modelNotLoaded">模型未加载</span>
