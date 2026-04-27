@@ -18,12 +18,9 @@ import { getSlideToggleOptions, saveSettingsDebounced, eventSource, event_types 
 import { slideToggle } from '/lib.js';
 
 import { horaeManager, createEmptyMeta, getItemBaseName } from './core/horaeManager.js';
-import { vectorManager } from './core/vectorManager.js';
-import { calculateRelativeTime, calculateDetailedRelativeTime, formatRelativeTime, generateTimeReference, getCurrentSystemTime, formatStoryDate, formatFullDateTime, parseStoryDate } from './utils/timeUtils.js';
 import { t, initI18n, getLanguage, isZhLocale, setLanguage, detectEffectiveAiLangIsZh, detectEffectiveAiLang } from './core/i18n.js';
-import { triggerBmeMaintenance } from './core/bme/bme-maintenance.js';
-import { loadGraphFromChat } from './core/bme/bme-bridge.js';
-import { openGraphModal } from './core/bme/visualizer.js';
+import { calculateRelativeTime, calculateDetailedRelativeTime, formatRelativeTime, generateTimeReference, getCurrentSystemTime, formatStoryDate, formatFullDateTime, parseStoryDate } from './utils/timeUtils.js';
+import { t2s } from './utils/zhConvert.js';
 
 // ============================================
 // 常量定义
@@ -15823,4 +15820,3470 @@ jQuery(async () => {
     isInitialized = true;
     _chatFullyLoaded = true;
     console.log(`[Horae] v${VERSION} 加载完成！作者: SenriYuki`);
-});
+});/**
+ * BME Graph Visualizer
+ * Dynamically loads vis-network to render the cognitive memory graph
+ */
+
+const VIS_CDN = 'https://unpkg.com/vis-network/standalone/umd/vis-network.min.js';
+
+let isVisLoaded = false;
+let isVisLoading = false;
+
+/**
+ * Ensures vis-network is loaded into the page.
+ */
+function loadVisLibrary() {
+    return new Promise((resolve, reject) => {
+        if (window.vis || isVisLoaded) {
+            resolve();
+            return;
+        }
+        if (isVisLoading) {
+            // Wait for it to finish loading
+            const checkInterval = setInterval(() => {
+                if (window.vis) {
+                    clearInterval(checkInterval);
+                    resolve();
+                }
+            }, 100);
+            return;
+        }
+
+        isVisLoading = true;
+        const script = document.createElement('script');
+        script.src = VIS_CDN;
+        script.type = 'text/javascript';
+        script.onload = () => {
+            isVisLoaded = true;
+            isVisLoading = false;
+            resolve();
+        };
+        script.onerror = (e) => {
+            isVisLoading = false;
+            console.error('[BME Visualizer] Failed to load vis-network script', e);
+            reject(new Error('Failed to load vis-network library.'));
+        };
+        document.head.appendChild(script);
+    });
+}
+
+/**
+ * Prepares the graph data for vis-network format
+ */
+function prepareGraphData(graph) {
+    const nodes = new vis.DataSet();
+    const edges = new vis.DataSet();
+
+    const STYLES = {
+        LEVEL_0: { background: '#2c3e50', border: '#34495e', font: '#ecf0f1' },
+        LEVEL_1: { background: '#8e44ad', border: '#9b59b6', font: '#ffffff' },
+        ARCHIVED: { background: '#2b2b2b', border: '#444444', font: '#7f8c8d' },
+    };
+
+    graph.nodes.forEach(node => {
+        // Truncate content for label
+        let labelText = node.content;
+        if (labelText && labelText.length > 50) {
+            labelText = labelText.substring(0, 47) + '...';
+        }
+
+        let style = node.level > 0 ? STYLES.LEVEL_1 : STYLES.LEVEL_0;
+        let opacity = 1;
+
+        if (node.archived) {
+            style = STYLES.ARCHIVED;
+            opacity = 0.6;
+        }
+
+        // Include node ID in the title (tooltip)
+        let titleHtml = `
+            <div style="max-width: 300px; white-space: pre-wrap; font-family: sans-serif; font-size: 12px; color: #fff;">
+                <b>ID:</b> ${node.id}<br/>
+                <b>Level:</b> ${node.level}<br/>
+                <b>Archived:</b> ${!!node.archived}<br/>
+                <b>Energy:</b> ${(node.energy || 0).toFixed(3)}<br/>
+                <b>StoryTime:</b> ${node.storyTime || 'Unknown'}<br/>
+                <b>Scope:</b> ${node.scope || 'Global'}<br/>
+                <hr style="border-color: #555;"/>
+                ${node.content}
+            </div>
+        `;
+
+        nodes.add({
+            id: node.id,
+            label: labelText,
+            title: titleHtml,
+            shape: 'box',
+            color: {
+                background: style.background,
+                border: style.border,
+                highlight: {
+                    background: '#2980b9',
+                    border: '#3498db'
+                }
+            },
+            font: { color: style.font, face: 'monospace', size: 12 },
+            borderWidth: 2,
+            opacity: opacity,
+            shadow: true,
+            margin: 10
+        });
+    });
+
+    graph.edges.forEach(edge => {
+        edges.add({
+            id: edge.id,
+            from: edge.source,
+            to: edge.target,
+            label: edge.type,
+            font: { size: 10, color: '#aaa', align: 'horizontal' },
+            color: { color: '#666', highlight: '#3498db' },
+            arrows: {
+                to: { enabled: true, scaleFactor: 0.5, type: 'arrow' }
+            },
+            dashes: edge.type === 'TEMPORAL' ? true : false,
+            smooth: { type: 'continuous' }
+        });
+    });
+
+    return { nodes, edges };
+}
+
+/**
+ * Opens a full-screen modal to render the vis-network graph
+ * @param {Object} graph - The Horae BME Graph object
+ */
+async function openGraphModal(graph) {
+    try {
+        await loadVisLibrary();
+    } catch (err) {
+        if (window.toastr) {
+            window.toastr.error('Failed to load vis-network for Graph Visualization.');
+        }
+        return;
+    }
+
+    if (!graph || !graph.nodes) {
+        if (window.toastr) {
+            window.toastr.warning('Graph is empty or not loaded.');
+        }
+        return;
+    }
+
+    // 1. Create Modal Container
+    const modalId = 'horae-bme-vis-modal';
+    let modal = document.getElementById(modalId);
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = modalId;
+        Object.assign(modal.style, {
+            position: 'fixed',
+            top: '0', left: '0', width: '100vw', height: '100vh',
+            backgroundColor: 'rgba(10, 10, 15, 0.95)',
+            zIndex: '99999',
+            display: 'flex',
+            flexDirection: 'column',
+            fontFamily: 'sans-serif'
+        });
+
+        // Header
+        const header = document.createElement('div');
+        Object.assign(header.style, {
+            padding: '12px 20px',
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            borderBottom: '1px solid #333',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            color: '#fff'
+        });
+        
+        const title = document.createElement('h3');
+        title.style.margin = '0';
+        title.innerHTML = '<i class="fa-solid fa-diagram-project"></i> BME Cognitive Memory Graph';
+        
+        const closeBtn = document.createElement('button');
+        closeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i> Close';
+        Object.assign(closeBtn.style, {
+            background: 'transparent', border: '1px solid #555',
+            color: '#fff', padding: '6px 12px', borderRadius: '4px',
+            cursor: 'pointer'
+        });
+        closeBtn.onclick = () => {
+            modal.style.display = 'none';
+        };
+
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+        modal.appendChild(header);
+
+        // Network Container
+        const networkContainer = document.createElement('div');
+        networkContainer.id = 'horae-bme-vis-container';
+        Object.assign(networkContainer.style, {
+            flex: '1',
+            width: '100%',
+            position: 'relative'
+        });
+        modal.appendChild(networkContainer);
+
+        document.body.appendChild(modal);
+    }
+
+    modal.style.display = 'flex';
+    const container = document.getElementById('horae-bme-vis-container');
+
+    // 2. Prepare Data and Render
+    const data = prepareGraphData(graph);
+    
+    const options = {
+        layout: {
+            improvedLayout: true
+        },
+        physics: {
+            forceAtlas2Based: {
+                gravitationalConstant: -50,
+                centralGravity: 0.01,
+                springLength: 100,
+                springConstant: 0.08,
+                damping: 0.4
+            },
+            minVelocity: 0.75,
+            solver: 'forceAtlas2Based'
+        },
+        interaction: {
+            tooltipDelay: 200,
+            hover: true,
+            zoomView: true,
+            dragView: true
+        }
+    };
+
+    // Render it
+    new window.vis.Network(container, data, options);
+}
+// core/vectorManager.js
+
+
+
+// core/bme/diffusion.js
+var INHIBIT_EDGE_TYPE = 255;
+var DEFAULT_OPTIONS = {
+  maxSteps: 2,
+  // max diffusion steps
+  decayFactor: 0.6,
+  // energy decay per step
+  topK: 100,
+  // max active nodes retained per step
+  minEnergy: 0.01,
+  // minimum valid energy (below = inactive)
+  maxEnergy: 2,
+  // energy upper bound
+  minEnergy_clamp: -2,
+  // energy lower bound (inhibition)
+  teleportAlpha: 0,
+  // PPR-style pull-back probability
+  inhibitMultiplier: 2
+  // negative propagation multiplier for inhibitory edges
+};
+function propagateActivation(adjacencyMap, seedNodes, options = {}) {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  const teleportAlpha = clamp01(opts.teleportAlpha);
+  let currentEnergy = /* @__PURE__ */ new Map();
+  const initialEnergy = /* @__PURE__ */ new Map();
+  for (const seed of seedNodes || []) {
+    if (!seed?.id) continue;
+    const clamped = clampEnergy(Number(seed.energy) || 0, opts);
+    if (Math.abs(clamped) >= opts.minEnergy) {
+      const existing = currentEnergy.get(seed.id) || 0;
+      const next = clampEnergy(existing + clamped, opts);
+      currentEnergy.set(seed.id, next);
+      initialEnergy.set(seed.id, next);
+    }
+  }
+  const result = new Map(currentEnergy);
+  for (let step = 0; step < opts.maxSteps; step++) {
+    const nextEnergy = /* @__PURE__ */ new Map();
+    for (const [nodeId, energy] of currentEnergy) {
+      const neighbors = adjacencyMap.get(nodeId);
+      if (!Array.isArray(neighbors) || neighbors.length === 0) continue;
+      for (const neighbor of neighbors) {
+        if (!neighbor?.targetId) continue;
+        let propagated = energy * (Number(neighbor.strength) || 0) * opts.decayFactor * (1 - teleportAlpha);
+        if (neighbor.edgeType === INHIBIT_EDGE_TYPE) {
+          propagated = -Math.abs(energy) * (Number(neighbor.strength) || 0) * opts.decayFactor * (Number(opts.inhibitMultiplier) || 1);
+        }
+        const existing = nextEnergy.get(neighbor.targetId) || 0;
+        nextEnergy.set(neighbor.targetId, existing + propagated);
+      }
+    }
+    for (const [nodeId, energy] of nextEnergy) {
+      const clamped = clampEnergy(energy, opts);
+      if (Math.abs(clamped) < opts.minEnergy) {
+        nextEnergy.delete(nodeId);
+      } else {
+        nextEnergy.set(nodeId, clamped);
+      }
+    }
+    if (teleportAlpha > 0) {
+      for (const [nodeId, seedEnergy] of initialEnergy) {
+        const current = nextEnergy.get(nodeId) || 0;
+        const teleported = (1 - teleportAlpha) * current + teleportAlpha * seedEnergy;
+        const clamped = clampEnergy(teleported, opts);
+        if (Math.abs(clamped) >= opts.minEnergy) {
+          nextEnergy.set(nodeId, clamped);
+        } else {
+          nextEnergy.delete(nodeId);
+        }
+      }
+    }
+    if (nextEnergy.size > opts.topK) {
+      const sorted = [...nextEnergy.entries()].sort(
+        (a, b) => Math.abs(b[1]) - Math.abs(a[1])
+      );
+      nextEnergy.clear();
+      for (let i = 0; i < opts.topK && i < sorted.length; i++) {
+        nextEnergy.set(sorted[i][0], sorted[i][1]);
+      }
+    }
+    for (const [nodeId, energy] of nextEnergy) {
+      const existing = result.get(nodeId) || 0;
+      if (Math.abs(energy) > Math.abs(existing)) {
+        result.set(nodeId, energy);
+      }
+    }
+    currentEnergy = nextEnergy;
+    if (currentEnergy.size === 0) break;
+  }
+  return result;
+}
+function clampEnergy(energy, opts) {
+  return Math.max(opts.minEnergy_clamp, Math.min(opts.maxEnergy, energy));
+}
+function clamp01(value) {
+  return Math.max(0, Math.min(1, Number(value) || 0));
+}
+function diffuseAndRank(adjacencyMap, seeds, options = {}) {
+  const energyMap = propagateActivation(adjacencyMap, seeds, options);
+  return [...energyMap.entries()].filter(([_, energy]) => energy > 0).map(([nodeId, energy]) => ({ nodeId, energy })).sort((a, b) => {
+    if (b.energy !== a.energy) return b.energy - a.energy;
+    return String(a.nodeId).localeCompare(String(b.nodeId));
+  });
+}
+
+// core/bme/dynamics.js
+function reinforceAccess(node) {
+  node.accessCount = (node.accessCount || 0) + 1;
+  node.importance = Math.min(10, (node.importance || 5) + 0.1);
+  node.lastAccessTime = Date.now();
+}
+function timeDecayFactor(createdTime, now = Date.now()) {
+  const deltaDays = Math.max(0, (now - createdTime) / (1e3 * 60 * 60 * 24));
+  return 0.8 + 0.2 / (1 + Math.log(1 + deltaDays));
+}
+function hybridScore({
+  graphScore = 0,
+  vectorScore = 0,
+  lexicalScore = 0,
+  importance = 5,
+  createdTime = Date.now()
+}, weights = {}) {
+  const alpha = weights.graphWeight ?? 0.6;
+  const beta = weights.vectorWeight ?? 0.3;
+  const gamma = weights.importanceWeight ?? 0.1;
+  const delta = weights.lexicalWeight ?? 0;
+  const normGraph = Math.max(0, Math.min(1, graphScore / 2));
+  const normVec = Math.max(0, Math.min(1, vectorScore));
+  const normLexical = Math.max(0, Math.min(1, lexicalScore));
+  const normImportance = Math.max(0, Math.min(1, importance / 10));
+  const totalWeight = Math.max(
+    1e-6,
+    Math.max(0, alpha) + Math.max(0, beta) + Math.max(0, gamma) + Math.max(0, delta)
+  );
+  const baseScore = (normGraph * alpha + normVec * beta + normLexical * delta + normImportance * gamma) / totalWeight;
+  const decay = timeDecayFactor(createdTime);
+  return baseScore * decay;
+}
+function reinforceAccessBatch(nodes) {
+  for (const node of nodes) {
+    reinforceAccess(node);
+  }
+}
+
+// core/bme/schema.js
+var COMPRESSION_MODE = { NONE: "none", HIERARCHICAL: "hierarchical" };
+var EDGE_TYPES = {
+  TEMPORAL: "temporal",
+  PARTICIPATED: "participated",
+  OCCURRED_AT: "occurred_at",
+  CO_OCCURRED: "co_occurred",
+  CAUSAL: "causal",
+  INHIBIT: "inhibit",
+  RELATED: "related",
+  SUPERSEDES: "supersedes",
+  COMPRESSED_FROM: "compressed_from",
+  SUPPORTS: "supports",
+  CONTRADICTS: "contradicts"
+};
+var EDGE_TYPE_CODES = { NORMAL: 0, INHIBIT: 255 };
+var SCOPE_LAYERS = {
+  OBJECTIVE: "objective",
+  POV: "pov"
+};
+var DEFAULT_NODE_SCHEMA = [
+  // === Core types ===
+  {
+    id: "event",
+    label: "Event",
+    columns: [
+      { name: "title", required: false },
+      { name: "summary", required: true },
+      { name: "participants", required: false },
+      { name: "status", required: false },
+      { name: "level", required: false }
+    ],
+    // Keep backward compat — 'fields' alias for 'columns'
+    get fields() {
+      return this.columns;
+    },
+    alwaysInject: true,
+    latestOnly: false,
+    compression: { mode: COMPRESSION_MODE.HIERARCHICAL, threshold: 9, fanIn: 3, maxDepth: 2, keepRecentLeaves: 2 }
+  },
+  {
+    id: "character",
+    label: "Character",
+    columns: [
+      { name: "name", required: true },
+      { name: "traits", required: false },
+      { name: "state", required: false },
+      { name: "relationship", required: false }
+    ],
+    get fields() {
+      return this.columns;
+    },
+    alwaysInject: false,
+    latestOnly: true,
+    compression: { mode: COMPRESSION_MODE.NONE }
+  },
+  {
+    id: "location",
+    label: "Location",
+    columns: [
+      { name: "name", required: true },
+      { name: "state", required: false },
+      { name: "features", required: false },
+      { name: "atmosphere", required: false }
+    ],
+    get fields() {
+      return this.columns;
+    },
+    alwaysInject: false,
+    latestOnly: true,
+    compression: { mode: COMPRESSION_MODE.NONE }
+  },
+  // === Extended cognitive types (Phase 2) ===
+  {
+    id: "rule",
+    label: "Rule",
+    columns: [
+      { name: "name", required: true },
+      { name: "description", required: true },
+      { name: "scope", required: false }
+    ],
+    get fields() {
+      return this.columns;
+    },
+    alwaysInject: true,
+    latestOnly: true,
+    compression: { mode: COMPRESSION_MODE.NONE }
+  },
+  {
+    id: "thread",
+    label: "Thread",
+    columns: [
+      { name: "title", required: true },
+      { name: "summary", required: true },
+      { name: "status", required: false },
+      // active / resolved / abandoned
+      { name: "participants", required: false }
+    ],
+    get fields() {
+      return this.columns;
+    },
+    alwaysInject: true,
+    latestOnly: false,
+    compression: { mode: COMPRESSION_MODE.NONE }
+  },
+  {
+    id: "synopsis",
+    label: "Synopsis",
+    columns: [
+      { name: "title", required: false },
+      { name: "summary", required: true },
+      { name: "period", required: false }
+      // e.g. "messages 10-30"
+    ],
+    get fields() {
+      return this.columns;
+    },
+    alwaysInject: false,
+    latestOnly: false,
+    compression: { mode: COMPRESSION_MODE.HIERARCHICAL, threshold: 5, fanIn: 3, maxDepth: 1 }
+  },
+  {
+    id: "reflection",
+    label: "Reflection",
+    columns: [
+      { name: "insight", required: true },
+      { name: "triggers", required: false },
+      // what prompted this reflection
+      { name: "confidence", required: false }
+    ],
+    get fields() {
+      return this.columns;
+    },
+    alwaysInject: false,
+    latestOnly: false,
+    compression: { mode: COMPRESSION_MODE.NONE }
+  },
+  {
+    id: "pov_memory",
+    label: "POV Memory",
+    columns: [
+      { name: "owner", required: true },
+      // character name
+      { name: "summary", required: true },
+      { name: "emotion", required: false },
+      { name: "perspective", required: false }
+    ],
+    get fields() {
+      return this.columns;
+    },
+    alwaysInject: false,
+    latestOnly: false,
+    compression: { mode: COMPRESSION_MODE.HIERARCHICAL, threshold: 12, fanIn: 4, maxDepth: 1 }
+  }
+];
+function getSchemaForType(typeId) {
+  return DEFAULT_NODE_SCHEMA.find((s) => s.id === typeId) || null;
+}
+function isCompressibleType(typeId) {
+  const schema = getSchemaForType(typeId);
+  return schema?.compression?.mode === COMPRESSION_MODE.HIERARCHICAL;
+}
+
+// core/bme/graph.js
+var GRAPH_VERSION = 2;
+function uuid() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    const v = c === "x" ? r : r & 3 | 8;
+    return v.toString(16);
+  });
+}
+function createEmptyBmeGraph() {
+  return {
+    version: GRAPH_VERSION,
+    lastProcessedSeq: -1,
+    nodes: [],
+    edges: [],
+    timeline: [],
+    knowledgeState: null,
+    lastRecallResult: null,
+    consolidationStats: { totalRuns: 0, lastRunAt: null },
+    compressionStats: { totalRuns: 0, lastRunAt: null }
+  };
+}
+function createNode({
+  type,
+  fields = {},
+  seq = 0,
+  seqRange = null,
+  importance = 5,
+  scope = null,
+  storyTime = null,
+  clusters = []
+}) {
+  const now = Date.now();
+  return {
+    id: uuid(),
+    type,
+    level: 0,
+    parentId: null,
+    childIds: [],
+    seq,
+    seqRange: seqRange || [seq, seq],
+    archived: false,
+    fields,
+    embedding: null,
+    importance: Math.max(0, Math.min(10, importance)),
+    accessCount: 0,
+    updatedAt: now,
+    lastAccessTime: now,
+    createdTime: now,
+    prevId: null,
+    nextId: null,
+    // Phase 2 extensions
+    scope: scope || null,
+    storyTime: storyTime || null,
+    storyTimeSpan: null,
+    clusters: Array.isArray(clusters) ? clusters : []
+  };
+}
+function addNode(graph, node) {
+  const sameTypeNodes = graph.nodes.filter((n) => n.type === node.type && !n.archived && n.level === 0).sort((a, b) => a.seq - b.seq);
+  if (sameTypeNodes.length > 0) {
+    const lastNode = sameTypeNodes[sameTypeNodes.length - 1];
+    lastNode.nextId = node.id;
+    node.prevId = lastNode.id;
+  }
+  graph.nodes.push(node);
+  return node;
+}
+function getNode(graph, nodeId) {
+  return graph.nodes.find((n) => n.id === nodeId) || null;
+}
+function getActiveNodes(graph) {
+  return graph.nodes.filter((n) => !n.archived);
+}
+function getActiveNodesByType(graph, type) {
+  return graph.nodes.filter((n) => n.type === type && !n.archived);
+}
+function createEdge({
+  sourceId,
+  targetId,
+  type = EDGE_TYPES.TEMPORAL,
+  strength = 0.5,
+  label = ""
+}) {
+  return {
+    id: uuid(),
+    sourceId,
+    targetId,
+    type,
+    edgeType: type === EDGE_TYPES.INHIBIT ? EDGE_TYPE_CODES.INHIBIT : EDGE_TYPE_CODES.NORMAL,
+    strength: Math.max(0, Math.min(1, strength)),
+    label,
+    createdTime: Date.now(),
+    invalidAt: null
+  };
+}
+function addEdge(graph, edge) {
+  const exists = graph.edges.find(
+    (e) => e.sourceId === edge.sourceId && e.targetId === edge.targetId && e.type === edge.type && !e.invalidAt
+  );
+  if (exists) return null;
+  graph.edges.push(edge);
+  return edge;
+}
+function buildTemporalAdjacencyMap(graph) {
+  const adjMap = /* @__PURE__ */ new Map();
+  const ensureList = (nodeId) => {
+    if (!adjMap.has(nodeId)) adjMap.set(nodeId, []);
+    return adjMap.get(nodeId);
+  };
+  for (const edge of graph.edges) {
+    if (edge.invalidAt) continue;
+    const list = ensureList(edge.sourceId);
+    list.push({
+      targetId: edge.targetId,
+      strength: edge.strength,
+      edgeType: edge.edgeType || EDGE_TYPE_CODES.NORMAL
+    });
+    if (edge.edgeType !== EDGE_TYPE_CODES.INHIBIT) {
+      const reverseList = ensureList(edge.targetId);
+      reverseList.push({
+        targetId: edge.sourceId,
+        strength: edge.strength * 0.5,
+        // reverse direction at half strength
+        edgeType: EDGE_TYPE_CODES.NORMAL
+      });
+    }
+  }
+  for (const node of graph.nodes) {
+    if (node.archived) continue;
+    if (node.nextId) {
+      const list = ensureList(node.id);
+      list.push({
+        targetId: node.nextId,
+        strength: 0.3,
+        // temporal proximity weight
+        edgeType: EDGE_TYPE_CODES.NORMAL
+      });
+    }
+    if (node.prevId) {
+      const list = ensureList(node.id);
+      list.push({
+        targetId: node.prevId,
+        strength: 0.3,
+        edgeType: EDGE_TYPE_CODES.NORMAL
+      });
+    }
+  }
+  return adjMap;
+}
+function findNodesBySeq(graph, seq, type = null) {
+  return graph.nodes.filter((n) => {
+    if (n.archived) return false;
+    if (type && n.type !== type) return false;
+    if (n.seqRange) {
+      return seq >= n.seqRange[0] && seq <= n.seqRange[1];
+    }
+    return n.seq === seq;
+  });
+}
+
+// core/bme/memory-scope.js
+var MEMORY_SCOPE_BUCKETS = {
+  CHARACTER_POV: "characterPov",
+  USER_POV: "userPov",
+  OBJECTIVE_CURRENT_REGION: "objectiveCurrentRegion",
+  OBJECTIVE_ADJACENT_REGION: "objectiveAdjacentRegion",
+  OBJECTIVE_GLOBAL: "objectiveGlobal",
+  EXCLUDED: "excluded"
+};
+var DEFAULT_SCOPE = {
+  layer: SCOPE_LAYERS.OBJECTIVE,
+  ownerKey: "",
+  region: "",
+  visibility: 1
+};
+function normalizeMemoryScope(rawScope) {
+  if (!rawScope || typeof rawScope !== "object") {
+    return { ...DEFAULT_SCOPE };
+  }
+  const layer = rawScope.layer === SCOPE_LAYERS.POV ? SCOPE_LAYERS.POV : SCOPE_LAYERS.OBJECTIVE;
+  return {
+    layer,
+    ownerKey: String(rawScope.ownerKey || "").trim().toLowerCase(),
+    region: String(rawScope.region || "").trim().toLowerCase(),
+    visibility: Number.isFinite(rawScope.visibility) ? Math.max(0, Math.min(1, rawScope.visibility)) : 1
+  };
+}
+function createPovScope(characterName, region = "") {
+  return normalizeMemoryScope({
+    layer: SCOPE_LAYERS.POV,
+    ownerKey: characterName,
+    region
+  });
+}
+function createObjectiveScope(region = "") {
+  return normalizeMemoryScope({
+    layer: SCOPE_LAYERS.OBJECTIVE,
+    region
+  });
+}
+function classifyNodeScopeBucket(node, activeOwnerKey = "", activeRegion = "", settings = {}) {
+  const scope = normalizeMemoryScope(node?.scope);
+  const normalizedOwner = activeOwnerKey.trim().toLowerCase();
+  const normalizedRegion = activeRegion.trim().toLowerCase();
+  if (scope.layer === SCOPE_LAYERS.POV) {
+    if (!settings.enablePovMemory) {
+      return { bucket: MEMORY_SCOPE_BUCKETS.EXCLUDED, weight: 0, reason: "pov-disabled" };
+    }
+    if (scope.ownerKey === normalizedOwner) {
+      return {
+        bucket: MEMORY_SCOPE_BUCKETS.CHARACTER_POV,
+        weight: settings.recallCharacterPovWeight ?? 1.25,
+        reason: "character-pov-match"
+      };
+    }
+    if (scope.ownerKey === "user" || scope.ownerKey === "{{user}}") {
+      return {
+        bucket: MEMORY_SCOPE_BUCKETS.USER_POV,
+        weight: settings.recallUserPovWeight ?? 1.05,
+        reason: "user-pov"
+      };
+    }
+    return {
+      bucket: MEMORY_SCOPE_BUCKETS.CHARACTER_POV,
+      weight: (settings.recallCharacterPovWeight ?? 1.25) * 0.5,
+      reason: "other-character-pov"
+    };
+  }
+  if (scope.region && normalizedRegion) {
+    if (scope.region === normalizedRegion) {
+      return {
+        bucket: MEMORY_SCOPE_BUCKETS.OBJECTIVE_CURRENT_REGION,
+        weight: settings.recallObjectiveCurrentRegionWeight ?? 1.15,
+        reason: "objective-current-region"
+      };
+    }
+    const regionWords = new Set(normalizedRegion.split(/[\s,/]+/).filter(Boolean));
+    const scopeWords = scope.region.split(/[\s,/]+/).filter(Boolean);
+    const hasOverlap = scopeWords.some((w) => regionWords.has(w));
+    if (hasOverlap && settings.enableSpatialAdjacency !== false) {
+      return {
+        bucket: MEMORY_SCOPE_BUCKETS.OBJECTIVE_ADJACENT_REGION,
+        weight: settings.recallObjectiveAdjacentRegionWeight ?? 0.9,
+        reason: "objective-adjacent-region"
+      };
+    }
+  }
+  return {
+    bucket: MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL,
+    weight: settings.recallObjectiveGlobalWeight ?? 0.75,
+    reason: scope.region ? "objective-distant-region" : "objective-global"
+  };
+}
+function canMergeScopedMemories(nodeA, nodeB) {
+  const scopeA = normalizeMemoryScope(nodeA?.scope);
+  const scopeB = normalizeMemoryScope(nodeB?.scope);
+  if (scopeA.layer !== scopeB.layer) return false;
+  if (scopeA.layer === SCOPE_LAYERS.POV) {
+    return scopeA.ownerKey === scopeB.ownerKey;
+  }
+  return true;
+}
+
+// core/bme/story-timeline.js
+var STORY_TEMPORAL_BUCKETS = {
+  CURRENT: "current",
+  ADJACENT: "adjacent",
+  NEAR_PAST: "nearPast",
+  DISTANT_PAST: "distantPast",
+  FUTURE: "future",
+  FLASHBACK: "flashback",
+  UNKNOWN: "unknown"
+};
+var TEMPORAL_BUCKET_WEIGHTS = {
+  [STORY_TEMPORAL_BUCKETS.CURRENT]: 1,
+  [STORY_TEMPORAL_BUCKETS.ADJACENT]: 0.85,
+  [STORY_TEMPORAL_BUCKETS.NEAR_PAST]: 0.65,
+  [STORY_TEMPORAL_BUCKETS.DISTANT_PAST]: 0.35,
+  [STORY_TEMPORAL_BUCKETS.FUTURE]: 0.25,
+  [STORY_TEMPORAL_BUCKETS.FLASHBACK]: 0.45,
+  [STORY_TEMPORAL_BUCKETS.UNKNOWN]: 0.5
+};
+var TENSE = { PAST: "past", PRESENT: "present", FUTURE: "future" };
+function createTimelineSegment({
+  label = "",
+  sortKey = 0,
+  storyDate = "",
+  storyTime = "",
+  tense = TENSE.PRESENT,
+  anchorSeq = null
+} = {}) {
+  return {
+    id: `seg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    label: label || `Segment ${sortKey}`,
+    sortKey,
+    storyDate,
+    storyTime,
+    tense,
+    anchorSeq,
+    createdAt: Date.now()
+  };
+}
+function upsertTimelineSegment(graph, segment) {
+  if (!graph.timeline) graph.timeline = [];
+  const existing = graph.timeline.find(
+    (s) => s.sortKey === segment.sortKey || segment.storyDate && s.storyDate === segment.storyDate
+  );
+  if (existing) {
+    if (segment.label) existing.label = segment.label;
+    if (segment.storyTime) existing.storyTime = segment.storyTime;
+    if (segment.anchorSeq !== null) existing.anchorSeq = segment.anchorSeq;
+    return existing;
+  }
+  graph.timeline.push(segment);
+  graph.timeline.sort((a, b) => a.sortKey - b.sortKey);
+  return segment;
+}
+function getTimelineSegments(graph) {
+  return (graph.timeline || []).slice().sort((a, b) => a.sortKey - b.sortKey);
+}
+function normalizeStoryTime(raw) {
+  if (!raw || typeof raw !== "object") {
+    return { segmentId: null, label: "", tense: TENSE.PRESENT, relation: "" };
+  }
+  return {
+    segmentId: raw.segmentId || null,
+    label: String(raw.label || ""),
+    tense: Object.values(TENSE).includes(raw.tense) ? raw.tense : TENSE.PRESENT,
+    relation: String(raw.relation || "")
+  };
+}
+function deriveStoryTimeFromHoraeMeta(horaeMeta, graph, seq) {
+  const ts = horaeMeta?.timestamp;
+  if (!ts) return normalizeStoryTime(null);
+  const storyDate = ts.story_date || "";
+  const storyTime = ts.story_time || "";
+  let segment = null;
+  if (storyDate) {
+    const sortKey = parseDateToSortKey(storyDate);
+    segment = upsertTimelineSegment(graph, createTimelineSegment({
+      label: buildSegmentLabel(storyDate, storyTime),
+      sortKey,
+      storyDate,
+      storyTime,
+      anchorSeq: seq
+    }));
+  }
+  return normalizeStoryTime({
+    segmentId: segment?.id || null,
+    label: storyDate ? `${storyDate} ${storyTime}`.trim() : "",
+    tense: TENSE.PRESENT,
+    relation: ""
+  });
+}
+function deriveStoryTimeSpanFromNodes(nodes) {
+  const labels = nodes.map((n) => n.storyTime?.label).filter(Boolean).sort();
+  if (labels.length === 0) return { start: "", end: "" };
+  return { start: labels[0], end: labels[labels.length - 1] };
+}
+function classifyStoryTemporalBucket(graph, node, activeSegmentId = null) {
+  const nodeStoryTime = normalizeStoryTime(node?.storyTime);
+  if (!nodeStoryTime.segmentId && !nodeStoryTime.label) {
+    return STORY_TEMPORAL_BUCKETS.UNKNOWN;
+  }
+  if (nodeStoryTime.tense === TENSE.PAST && nodeStoryTime.relation === "flashback") {
+    return STORY_TEMPORAL_BUCKETS.FLASHBACK;
+  }
+  if (nodeStoryTime.tense === TENSE.FUTURE) {
+    return STORY_TEMPORAL_BUCKETS.FUTURE;
+  }
+  if (!activeSegmentId) {
+    return STORY_TEMPORAL_BUCKETS.CURRENT;
+  }
+  if (nodeStoryTime.segmentId === activeSegmentId) {
+    return STORY_TEMPORAL_BUCKETS.CURRENT;
+  }
+  const segments = getTimelineSegments(graph);
+  const activeIdx = segments.findIndex((s) => s.id === activeSegmentId);
+  const nodeIdx = segments.findIndex((s) => s.id === nodeStoryTime.segmentId);
+  if (activeIdx === -1 || nodeIdx === -1) {
+    return STORY_TEMPORAL_BUCKETS.UNKNOWN;
+  }
+  const distance = activeIdx - nodeIdx;
+  if (distance === 1 || distance === -1) return STORY_TEMPORAL_BUCKETS.ADJACENT;
+  if (distance >= 2 && distance <= 5) return STORY_TEMPORAL_BUCKETS.NEAR_PAST;
+  if (distance > 5) return STORY_TEMPORAL_BUCKETS.DISTANT_PAST;
+  if (distance < -1) return STORY_TEMPORAL_BUCKETS.FUTURE;
+  return STORY_TEMPORAL_BUCKETS.UNKNOWN;
+}
+function resolveTemporalBucketWeight(bucket, settings = {}) {
+  const customWeights = settings.temporalBucketWeights || {};
+  return customWeights[bucket] ?? TEMPORAL_BUCKET_WEIGHTS[bucket] ?? 0.5;
+}
+function isStoryTimeCompatible(nodeA, nodeB) {
+  const stA = normalizeStoryTime(nodeA?.storyTime);
+  const stB = normalizeStoryTime(nodeB?.storyTime);
+  if (!stA.segmentId || !stB.segmentId) return true;
+  return stA.segmentId === stB.segmentId;
+}
+function parseDateToSortKey(dateStr) {
+  if (!dateStr) return 0;
+  const isoMatch = dateStr.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    return parseInt(isoMatch[1]) * 1e4 + parseInt(isoMatch[2]) * 100 + parseInt(isoMatch[3]);
+  }
+  const slashMatch = dateStr.match(/(\d+)\/(\d+)/);
+  if (slashMatch) {
+    return parseInt(slashMatch[1]) * 100 + parseInt(slashMatch[2]);
+  }
+  const dayMatch = dateStr.match(/Day\s+(\d+)/i);
+  if (dayMatch) {
+    return parseInt(dayMatch[1]);
+  }
+  let hash = 0;
+  for (let i = 0; i < dateStr.length; i++) {
+    hash = (hash << 5) - hash + dateStr.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash) % 1e5;
+}
+function buildSegmentLabel(storyDate, storyTime) {
+  const parts = [];
+  if (storyDate) parts.push(storyDate);
+  if (storyTime) parts.push(storyTime);
+  return parts.join(" \u2014 ") || "Unknown";
+}
+
+// core/bme/knowledge-state.js
+function normalizeGraphCognitiveState(graph, chat = null) {
+  if (!graph.knowledgeState) graph.knowledgeState = {};
+  const ks = graph.knowledgeState;
+  if (!ks.activeOwnerKey) ks.activeOwnerKey = "";
+  if (!ks.recentOwners) ks.recentOwners = [];
+  if (!ks.activeRegion) ks.activeRegion = "";
+  if (!ks.recentRegions) ks.recentRegions = [];
+  if (!ks.adjacentRegions) ks.adjacentRegions = [];
+  if (chat) {
+    _deriveFromChat(ks, chat);
+  }
+  return ks;
+}
+function _deriveFromChat(ks, chat) {
+  for (let i = chat.length - 1; i >= 0; i--) {
+    const meta = chat[i]?.horae_meta;
+    if (!meta?.scene) continue;
+    if (meta.scene.location && !ks._regionLocked) {
+      const region = meta.scene.location.trim().toLowerCase();
+      if (region !== ks.activeRegion) {
+        ks.activeRegion = region;
+        pushRecentRegion(ks, region);
+      }
+    }
+    const chars = meta.scene.characters_present || [];
+    if (chars.length > 0 && !ks._ownerLocked) {
+      const ownerKey = chars[0].trim().toLowerCase();
+      if (ownerKey !== ks.activeOwnerKey) {
+        ks.activeOwnerKey = ownerKey;
+        pushRecentRecallOwner(ks, ownerKey);
+      }
+    }
+    break;
+  }
+}
+function pushRecentRecallOwner(ks, ownerKey) {
+  if (!ks.recentOwners) ks.recentOwners = [];
+  const normalized = ownerKey.trim().toLowerCase();
+  if (!normalized) return;
+  ks.recentOwners = ks.recentOwners.filter((o) => o !== normalized);
+  ks.recentOwners.unshift(normalized);
+  if (ks.recentOwners.length > 5) ks.recentOwners.length = 5;
+}
+function resolveAdjacentRegions(ks) {
+  return (ks.recentRegions || []).filter((r) => r !== ks.activeRegion).slice(0, 3);
+}
+function pushRecentRegion(ks, region) {
+  if (!ks.recentRegions) ks.recentRegions = [];
+  const normalized = region.trim().toLowerCase();
+  if (!normalized) return;
+  ks.recentRegions = ks.recentRegions.filter((r) => r !== normalized);
+  ks.recentRegions.unshift(normalized);
+  if (ks.recentRegions.length > 5) ks.recentRegions.length = 5;
+  ks.adjacentRegions = resolveAdjacentRegions(ks);
+}
+function applyCognitionUpdates(graph, updates) {
+  const ks = normalizeGraphCognitiveState(graph);
+  if (updates.activeOwnerKey) {
+    const key = updates.activeOwnerKey.trim().toLowerCase();
+    if (key !== ks.activeOwnerKey) {
+      ks.activeOwnerKey = key;
+      pushRecentRecallOwner(ks, key);
+    }
+  }
+  if (updates.activeRegion) {
+    const region = updates.activeRegion.trim().toLowerCase();
+    if (region !== ks.activeRegion) {
+      ks.activeRegion = region;
+      pushRecentRegion(ks, region);
+    }
+  }
+}
+function applyRegionUpdates(graph, regionData) {
+  if (regionData?.location) {
+    applyCognitionUpdates(graph, { activeRegion: regionData.location });
+  }
+}
+
+// core/bme/bme-db.js
+var DB_PREFIX = "HoraeBME_";
+var DB_VERSION = 1;
+var STORE_GRAPH = "graphState";
+var STORE_NODES = "nodes";
+var STORE_EDGES = "edges";
+var STORE_META = "meta";
+var LOG_PREFIX = "[Horae BME DB]";
+async function openBmeDb(chatId) {
+  if (!chatId) throw new Error("chatId is required");
+  const dbName = `${DB_PREFIX}${_sanitizeChatId(chatId)}`;
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(dbName, DB_VERSION);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(STORE_GRAPH)) {
+        db.createObjectStore(STORE_GRAPH, { keyPath: "key" });
+      }
+      if (!db.objectStoreNames.contains(STORE_NODES)) {
+        const nodeStore = db.createObjectStore(STORE_NODES, { keyPath: "id" });
+        nodeStore.createIndex("type", "type", { unique: false });
+        nodeStore.createIndex("archived", "archived", { unique: false });
+        nodeStore.createIndex("updatedAt", "updatedAt", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_EDGES)) {
+        const edgeStore = db.createObjectStore(STORE_EDGES, { keyPath: "id" });
+        edgeStore.createIndex("sourceId", "sourceId", { unique: false });
+        edgeStore.createIndex("targetId", "targetId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_META)) {
+        db.createObjectStore(STORE_META, { keyPath: "key" });
+      }
+      console.log(`${LOG_PREFIX} Database ${dbName} created/upgraded to v${DB_VERSION}`);
+    };
+    request.onsuccess = () => {
+      console.log(`${LOG_PREFIX} Database ${dbName} opened`);
+      resolve(request.result);
+    };
+    request.onerror = () => {
+      console.warn(`${LOG_PREFIX} Failed to open database ${dbName}:`, request.error);
+      reject(request.error);
+    };
+  });
+}
+async function saveGraphToDb(db, graph) {
+  if (!db || !graph) return;
+  const tx = db.transaction([STORE_GRAPH, STORE_NODES, STORE_EDGES, STORE_META], "readwrite");
+  return new Promise((resolve, reject) => {
+    const graphStore = tx.objectStore(STORE_GRAPH);
+    graphStore.put({
+      key: "current",
+      version: graph.version,
+      lastProcessedSeq: graph.lastProcessedSeq,
+      timeline: graph.timeline || [],
+      knowledgeState: graph.knowledgeState || null,
+      lastRecallResult: graph.lastRecallResult || null,
+      consolidationStats: graph.consolidationStats || null,
+      compressionStats: graph.compressionStats || null,
+      savedAt: Date.now()
+    });
+    const nodeStore = tx.objectStore(STORE_NODES);
+    nodeStore.clear();
+    for (const node of graph.nodes) {
+      nodeStore.put(node);
+    }
+    const edgeStore = tx.objectStore(STORE_EDGES);
+    edgeStore.clear();
+    for (const edge of graph.edges) {
+      edgeStore.put(edge);
+    }
+    const metaStore = tx.objectStore(STORE_META);
+    metaStore.put({
+      key: "counts",
+      nodeCount: graph.nodes.length,
+      edgeCount: graph.edges.length,
+      activeNodeCount: graph.nodes.filter((n) => !n.archived).length,
+      lastSavedAt: Date.now()
+    });
+    tx.oncomplete = () => {
+      console.log(`${LOG_PREFIX} Graph saved (${graph.nodes.length} nodes, ${graph.edges.length} edges)`);
+      resolve();
+    };
+    tx.onerror = () => {
+      console.warn(`${LOG_PREFIX} Failed to save graph:`, tx.error);
+      reject(tx.error);
+    };
+  });
+}
+async function loadGraphFromDb(db) {
+  if (!db) return null;
+  try {
+    const [graphMeta, nodes, edges] = await Promise.all([
+      _getAll(db, STORE_GRAPH),
+      _getAll(db, STORE_NODES),
+      _getAll(db, STORE_EDGES)
+    ]);
+    const meta = graphMeta.find((g) => g.key === "current");
+    if (!meta) return null;
+    const graph = {
+      version: meta.version || 1,
+      lastProcessedSeq: meta.lastProcessedSeq ?? -1,
+      nodes: nodes || [],
+      edges: edges || [],
+      timeline: meta.timeline || [],
+      knowledgeState: meta.knowledgeState || null,
+      lastRecallResult: meta.lastRecallResult || null,
+      consolidationStats: meta.consolidationStats || null,
+      compressionStats: meta.compressionStats || null
+    };
+    console.log(`${LOG_PREFIX} Graph loaded from IDB (${graph.nodes.length} nodes, ${graph.edges.length} edges)`);
+    return graph;
+  } catch (err) {
+    console.warn(`${LOG_PREFIX} Failed to load graph from IDB:`, err);
+    return null;
+  }
+}
+function _getAll(db, storeName) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, "readonly");
+    const store = tx.objectStore(storeName);
+    const request = store.getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+function _sanitizeChatId(chatId) {
+  return String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 100);
+}
+
+// core/bme/bme-bridge.js
+var LOG_PREFIX2 = "[Horae BME]";
+var _dbCache = /* @__PURE__ */ new Map();
+async function loadGraphFromChat(chat, options = {}) {
+  const { useIdb = false, chatId = "" } = options;
+  if (useIdb && chatId) {
+    try {
+      const db = await _getOrOpenDb(chatId);
+      const idbGraph = await loadGraphFromDb(db);
+      if (idbGraph && idbGraph.nodes?.length > 0) {
+        console.log(`${LOG_PREFIX2} Graph loaded from IndexedDB (${idbGraph.nodes.length} nodes)`);
+        return idbGraph;
+      }
+    } catch (err) {
+      console.warn(`${LOG_PREFIX2} IndexedDB load failed, falling back to chat JSON:`, err);
+    }
+  }
+  if (!chat?.[0]?.horae_meta?.bmeGraph) {
+    return createEmptyBmeGraph();
+  }
+  const stored = chat[0].horae_meta.bmeGraph;
+  if (!stored.version || !Array.isArray(stored.nodes)) {
+    return createEmptyBmeGraph();
+  }
+  return stored;
+}
+async function saveGraphToChat(chat, graph, options = {}) {
+  const { useIdb = false, chatId = "" } = options;
+  if (chat?.[0]) {
+    if (!chat[0].horae_meta) chat[0].horae_meta = {};
+    chat[0].horae_meta.bmeGraph = graph;
+  }
+  if (useIdb && chatId) {
+    try {
+      const db = await _getOrOpenDb(chatId);
+      await saveGraphToDb(db, graph);
+    } catch (err) {
+      console.warn(`${LOG_PREFIX2} IndexedDB save failed:`, err);
+    }
+  }
+}
+function getOrCreateEntityNode(graph, type, name, seq, extraFields = {}, nodeOptions = {}) {
+  const normalizedName = name.trim();
+  if (!normalizedName) return null;
+  const existing = getActiveNodesByType(graph, type).find((n) => {
+    const nodeName = n.fields?.name || "";
+    return nodeName === normalizedName || nodeName.toLowerCase() === normalizedName.toLowerCase();
+  });
+  if (existing) {
+    if (Object.keys(extraFields).length > 0) {
+      existing.fields = { ...existing.fields, ...extraFields };
+      existing.updatedAt = Date.now();
+    }
+    return existing;
+  }
+  const node = createNode({
+    type,
+    fields: { name: normalizedName, ...extraFields },
+    seq,
+    importance: type === "character" ? 6 : 4,
+    scope: nodeOptions.scope || null,
+    storyTime: nodeOptions.storyTime || null
+  });
+  addNode(graph, node);
+  return node;
+}
+function syncMetaToGraph(graph, chat, fromSeq = null, settings = {}) {
+  const startSeq = fromSeq ?? graph.lastProcessedSeq + 1;
+  let nodesCreated = 0;
+  let edgesCreated = 0;
+  const newNodeIds = [];
+  normalizeGraphCognitiveState(graph, chat);
+  for (let i = Math.max(0, startSeq); i < chat.length; i++) {
+    const msg = chat[i];
+    const meta = msg?.horae_meta;
+    if (!meta || meta._skipHorae) continue;
+    const scope = _deriveScopeForMessage(msg, graph, settings);
+    const storyTime = settings.bmeStoryTimelineEnabled !== false ? deriveStoryTimeFromHoraeMeta(meta, graph, i) : null;
+    const result = _processMessageMeta(graph, meta, i, { scope, storyTime, settings });
+    nodesCreated += result.nodesCreated;
+    edgesCreated += result.edgesCreated;
+    newNodeIds.push(...result.newNodeIds);
+  }
+  _updateKnowledgeStateFromChat(graph, chat);
+  graph.lastProcessedSeq = chat.length - 1;
+  return { nodesCreated, edgesCreated, newNodeIds };
+}
+function _deriveScopeForMessage(msg, graph, settings = {}) {
+  if (!settings.bmeScopedMemoryEnabled) return null;
+  const isUser = msg.is_user;
+  const meta = msg.horae_meta;
+  const region = meta?.scene?.location || "";
+  if (isUser && settings.bmePovMemoryEnabled) {
+    return createPovScope("user", region);
+  }
+  return createObjectiveScope(region);
+}
+function _updateKnowledgeStateFromChat(graph, chat) {
+  const ks = normalizeGraphCognitiveState(graph);
+  for (let i = chat.length - 1; i >= 0; i--) {
+    const meta = chat[i]?.horae_meta;
+    if (!meta?.scene) continue;
+    if (meta.scene.location) {
+      applyRegionUpdates(graph, { location: meta.scene.location });
+    }
+    const chars = meta.scene.characters_present || [];
+    if (chars.length > 0) {
+      applyCognitionUpdates(graph, { activeOwnerKey: chars[0] });
+    }
+    break;
+  }
+}
+function _processMessageMeta(graph, meta, seq, options = {}) {
+  const { scope, storyTime, settings } = options;
+  let nodesCreated = 0;
+  let edgesCreated = 0;
+  const newNodeIds = [];
+  const events = meta.events || (meta.event ? [meta.event] : []);
+  const eventNodes = [];
+  for (const evt of events) {
+    if (!evt?.summary) continue;
+    if (evt.isSummary || evt.level === "\u6458\u8981" || evt._summaryId) continue;
+    const importance = evt.level === "\u5173\u952E" || evt.level === "\u95DC\u9375" ? 9 : evt.level === "\u91CD\u8981" ? 7 : 5;
+    const node = createNode({
+      type: "event",
+      fields: {
+        summary: evt.summary,
+        level: evt.level || "\u4E00\u822C",
+        participants: (meta.scene?.characters_present || []).join(", "),
+        status: "resolved"
+      },
+      seq,
+      importance,
+      scope: scope || null,
+      storyTime: storyTime || null
+    });
+    if (evt.accessCount) {
+      node.accessCount = evt.accessCount;
+    }
+    addNode(graph, node);
+    eventNodes.push(node);
+    newNodeIds.push(node.id);
+    nodesCreated++;
+  }
+  let locationNode = null;
+  if (meta.scene?.location) {
+    locationNode = getOrCreateEntityNode(graph, "location", meta.scene.location, seq, {
+      atmosphere: meta.scene?.atmosphere || ""
+    }, { scope: createObjectiveScope(meta.scene.location), storyTime });
+    if (locationNode && !locationNode._existed) nodesCreated++;
+  }
+  const charNodes = [];
+  const presentChars = meta.scene?.characters_present || [];
+  for (const charName of presentChars) {
+    const charNode = getOrCreateEntityNode(graph, "character", charName, seq, {}, {
+      scope: createObjectiveScope(),
+      storyTime
+    });
+    if (charNode) charNodes.push(charNode);
+  }
+  if (meta.npcs) {
+    for (const [name, info] of Object.entries(meta.npcs)) {
+      const charNode = getOrCreateEntityNode(graph, "character", name, seq, {
+        traits: info.appearance || "",
+        relationship: info.relationship || "",
+        state: info.personality || ""
+      }, { scope: createObjectiveScope(), storyTime });
+      if (charNode && !charNodes.find((c) => c.id === charNode.id)) {
+        charNodes.push(charNode);
+        nodesCreated++;
+      }
+    }
+  }
+  for (const eventNode of eventNodes) {
+    if (locationNode) {
+      const edge = createEdge({
+        sourceId: eventNode.id,
+        targetId: locationNode.id,
+        type: EDGE_TYPES.OCCURRED_AT,
+        strength: 0.6
+      });
+      if (addEdge(graph, edge)) edgesCreated++;
+    }
+    for (const charNode of charNodes) {
+      const edge = createEdge({
+        sourceId: eventNode.id,
+        targetId: charNode.id,
+        type: EDGE_TYPES.PARTICIPATED,
+        strength: 0.7
+      });
+      if (addEdge(graph, edge)) edgesCreated++;
+    }
+  }
+  for (let a = 0; a < charNodes.length; a++) {
+    for (let b = a + 1; b < charNodes.length; b++) {
+      const edge = createEdge({
+        sourceId: charNodes[a].id,
+        targetId: charNodes[b].id,
+        type: EDGE_TYPES.CO_OCCURRED,
+        strength: 0.4
+      });
+      if (addEdge(graph, edge)) edgesCreated++;
+    }
+  }
+  return { nodesCreated, edgesCreated, newNodeIds };
+}
+function vectorResultsToSeeds(graph, vectorResults) {
+  const seeds = [];
+  const seenIds = /* @__PURE__ */ new Set();
+  for (const result of vectorResults) {
+    const nodes = findNodesBySeq(graph, result.messageIndex);
+    for (const node of nodes) {
+      if (!seenIds.has(node.id)) {
+        seenIds.add(node.id);
+        seeds.push({
+          id: node.id,
+          energy: result.similarity
+        });
+      }
+    }
+  }
+  return seeds;
+}
+function diffusionResultsToMessages(graph, diffusionResults) {
+  const messageMap = /* @__PURE__ */ new Map();
+  for (const dr of diffusionResults) {
+    const node = getNode(graph, dr.nodeId);
+    if (!node || node.archived) continue;
+    const seq = node.seq;
+    const existing = messageMap.get(seq);
+    if (!existing || dr.energy > existing.energy) {
+      messageMap.set(seq, {
+        energy: dr.energy,
+        nodeId: dr.nodeId,
+        node
+      });
+    }
+  }
+  return messageMap;
+}
+async function _getOrOpenDb(chatId) {
+  if (_dbCache.has(chatId)) {
+    return _dbCache.get(chatId);
+  }
+  const db = await openBmeDb(chatId);
+  _dbCache.set(chatId, db);
+  return db;
+}
+
+// core/vectorManager.js
+var DB_NAME = "HoraeVectors";
+var DB_VERSION2 = 1;
+var STORE_NAME = "vectors";
+var MODEL_CONFIG = {
+  "Xenova/bge-small-zh-v1.5": { dimensions: 512, prefix: null },
+  "Xenova/multilingual-e5-small": { dimensions: 384, prefix: { query: "query: ", passage: "passage: " } }
+};
+var TERM_CATEGORIES = {
+  medical: ["\u5305\u624E", "\u4F24\u53E3", "\u6CBB\u7597", "\u6551\u6CBB", "\u5904\u7406\u4F24", "\u7597\u4F24", "\u6577\u836F", "\u4E0A\u836F", "\u53D7\u4F24", "\u8D1F\u4F24", "\u7167\u6599", "\u62A4\u7406", "\u6025\u6551", "\u6B62\u8840", "\u7EF7\u5E26", "\u7F1D\u5408", "\u5378\u7532", "\u7597\u517B", "\u4E2D\u6BD2", "\u89E3\u6BD2", "\u660F\u8FF7", "\u82CF\u9192"],
+  combat: ["\u6253\u67B6", "\u6253\u6597", "\u6218\u6597", "\u51B2\u7A81", "\u4EA4\u624B", "\u653B\u51FB", "\u51FB\u8D25", "\u65A9\u6740", "\u5BF9\u6297", "\u683C\u6597", "\u53AE\u6740", "\u780D", "\u5288", "\u523A", "\u4F0F\u51FB", "\u56F4\u653B", "\u51B3\u6597", "\u6BD4\u6B66", "\u9632\u5FA1", "\u64A4\u9000", "\u9003\u8DD1", "\u8FFD\u51FB"],
+  cooking: ["\u505A\u996D", "\u70F9\u996A", "\u716E", "\u7092", "\u70E4", "\u5582\u98DF", "\u5403\u996D", "\u559D\u7CA5", "\u9910", "\u6599\u7406", "\u81B3\u98DF", "\u53A8\u623F", "\u98DF\u6750", "\u7F8E\u98DF", "\u4E0B\u53A8", "\u70D8\u7119"],
+  clothing: ["\u6362\u8863", "\u66F4\u8863", "\u7A7F\u8863", "\u8131\u8863", "\u8863\u7269", "\u6362\u88C5", "\u6D74\u888D", "\u5185\u8863", "\u8FDE\u8863\u88D9", "\u886C\u886B"],
+  emotion_positive: ["\u5F00\u5FC3", "\u9AD8\u5174", "\u5FEB\u4E50", "\u6B22\u559C", "\u559C\u60A6", "\u6109\u5FEB", "\u6EE1\u8DB3", "\u611F\u52A8", "\u6E29\u99A8", "\u5E78\u798F"],
+  emotion_negative: ["\u751F\u6C14", "\u6124\u6012", "\u66B4\u6012", "\u53D1\u706B", "\u607C\u6012", "\u96BE\u8FC7", "\u4F24\u5FC3", "\u60B2\u4F24", "\u54ED\u6CE3", "\u843D\u6CEA", "\u5BB3\u6015", "\u6050\u60E7", "\u60CA\u6050", "\u59D4\u5C48", "\u5931\u843D", "\u7126\u8651", "\u7F9E\u803B", "\u6127\u759A", "\u5D29\u6E83"],
+  movement: ["\u62D6", "\u642C", "\u62B1", "\u80CC", "\u6276", "\u62AC", "\u63A8", "\u62C9", "\u5E26\u8D70", "\u8F6C\u79FB", "\u6400\u6276", "\u5B89\u987F"],
+  social: ["\u544A\u767D", "\u8868\u767D", "\u9053\u6B49", "\u62E5\u62B1", "\u4EB2\u543B", "\u63E1\u624B", "\u521D\u6B21", "\u91CD\u9022", "\u6C42\u5A5A", "\u8BA2\u5A5A", "\u7ED3\u5A5A"],
+  gift: ["\u793C\u7269", "\u8D60\u9001", "\u9001\u7ED9", "\u4FE1\u7269", "\u5B9A\u60C5", "\u6212\u6307", "\u9879\u94FE", "\u624B\u94FE", "\u82B1\u675F", "\u5DE7\u514B\u529B", "\u8D3A\u5361", "\u7EAA\u5FF5\u54C1", "\u5AC1\u5986", "\u8058\u793C", "\u5FBD\u7AE0", "\u52CB\u7AE0", "\u5B9D\u77F3", "\u6536\u4E0B", "\u8F6C\u8D60"],
+  ceremony: ["\u5A5A\u793C", "\u846C\u793C", "\u4EEA\u5F0F", "\u5178\u793C", "\u5E86\u5178", "\u8282\u65E5", "\u796D\u7940", "\u52A0\u5195", "\u518C\u5C01", "\u5BA3\u8A93", "\u6D17\u793C", "\u6210\u4EBA\u793C", "\u6BD5\u4E1A", "\u5E86\u795D", "\u7EAA\u5FF5\u65E5", "\u751F\u65E5", "\u5468\u5E74", "\u796D\u5178", "\u5F00\u5E55", "\u95ED\u5E55", "\u5E86\u529F", "\u5BB4\u4F1A", "\u821E\u4F1A"],
+  revelation: ["\u79D8\u5BC6", "\u771F\u76F8", "\u63ED\u9732", "\u5766\u767D", "\u66B4\u9732", "\u53D1\u73B0", "\u771F\u5B9E\u8EAB\u4EFD", "\u9690\u7792", "\u8C0E\u8A00", "\u6B3A\u9A97", "\u4F2A\u88C5", "\u5192\u5145", "\u771F\u540D", "\u8840\u7EDF", "\u8EAB\u4E16", "\u5367\u5E95", "\u95F4\u8C0D", "\u544A\u5BC6", "\u63ED\u7A7F", "\u62C6\u7A7F"],
+  promise: ["\u627F\u8BFA", "\u8A93\u8A00", "\u7EA6\u5B9A", "\u4FDD\u8BC1", "\u53D1\u8A93", "\u7ACB\u8A93", "\u5951\u7EA6", "\u76DF\u7EA6", "\u8BB8\u8BFA", "\u7EA6\u597D", "\u5B88\u62A4", "\u6548\u5FE0", "\u8A93\u7EA6"],
+  loss: ["\u6B7B\u4EA1", "\u53BB\u4E16", "\u727A\u7272", "\u79BB\u522B", "\u5206\u79BB", "\u544A\u522B", "\u5931\u53BB", "\u6D88\u5931", "\u9668\u843D", "\u51CB\u96F6", "\u6C38\u522B", "\u4E27\u5931", "\u9635\u4EA1", "\u6B89\u804C", "\u9001\u522B", "\u8BC0\u522B", "\u592D\u6298"],
+  power: ["\u89C9\u9192", "\u5347\u7EA7", "\u8FDB\u5316", "\u7A81\u7834", "\u8870\u9000", "\u5931\u53BB\u80FD\u529B", "\u89E3\u5C01", "\u5C01\u5370", "\u53D8\u8EAB", "\u5F02\u53D8", "\u83B7\u5F97\u529B\u91CF", "\u9B54\u529B", "\u80FD\u529B", "\u5929\u8D4B", "\u8840\u8109", "\u7EE7\u627F", "\u4F20\u627F", "\u4FEE\u70BC", "\u9886\u609F"],
+  intimate: ["\u4EB2\u70ED", "\u7F20\u7EF5", "\u60C5\u4E8B", "\u6625\u5BB5", "\u6B22\u7231", "\u5171\u5EA6", "\u540C\u5E8A", "\u808C\u80A4\u4E4B\u4EB2", "\u4EB2\u5BC6", "\u66A7\u6627", "\u6311\u9017", "\u8BF1\u60D1", "\u52FE\u5F15", "\u64A9\u62E8", "\u8C03\u60C5", "\u60C5\u52A8", "\u52A8\u60C5", "\u6B32\u671B", "\u6E34\u671B", "\u8D2A\u604B", "\u7D22\u6C42", "\u8FCE\u5408", "\u7EA0\u7F20", "\u75F4\u7F20", "\u6C89\u6CA6", "\u8FF7\u604B", "\u6C89\u6EBA", "\u5598\u606F", "\u98A4\u6296", "\u547B\u541F", "\u5A07\u5598", "\u4F4E\u541F", "\u6C42\u9976", "\u5931\u63A7", "\u9690\u5FCD", "\u514B\u5236", "\u653E\u7EB5", "\u8D2A\u5A6A", "\u6E29\u5B58", "\u4F59\u97F5", "\u7F31\u7EFB", "\u65D6\u65CE", "\u6027\u4EA4", "\u5185\u5C04", "\u989C\u5C04", "\u6027\u884C\u4E3A", "\u4E2D\u51FA", "\u5C04\u7CBE", "\u6027\u5668", "\u4EA4\u914D", "\u91CE\u5408", "\u6B22\u7231", "\u9AD8\u6F6E"],
+  body_contact: ["\u629A\u6478", "\u89E6\u78B0", "\u8D34\u8FD1", "\u4F9D\u504E", "\u6402\u62B1", "\u543B", "\u5543\u54AC", "\u8214", "\u542E", "\u6469\u6332", "\u63C9\u634F", "\u6309\u538B", "\u63E1\u4F4F", "\u7275\u624B", "\u5341\u6307\u76F8\u6263", "\u989D\u5934\u76F8\u62B5", "\u8033\u9B13\u53AE\u78E8", "\u8138\u7EA2", "\u5FC3\u8DF3", "\u8EAB\u4F53", "\u808C\u80A4", "\u9501\u9AA8", "\u8116\u9888", "\u8033\u5782", "\u5634\u5507", "\u8170\u80A2", "\u540E\u80CC", "\u53D1\u4E1D", "\u6307\u5C16", "\u638C\u5FC3"]
+};
+var VectorManager = class {
+  constructor() {
+    this.worker = null;
+    this.db = null;
+    this.chatId = null;
+    this.vectors = /* @__PURE__ */ new Map();
+    this.isReady = false;
+    this.isLoading = false;
+    this.isApiMode = false;
+    this.dimensions = 0;
+    this.modelName = "";
+    this._apiUrl = "";
+    this._apiKey = "";
+    this._apiModel = "";
+    this.termCounts = /* @__PURE__ */ new Map();
+    this.totalDocuments = 0;
+    this._pendingCallbacks = /* @__PURE__ */ new Map();
+    this._callId = 0;
+  }
+  // ========================================
+  // 生命周期
+  // ========================================
+  async initModel(model, dtype, onProgress) {
+    if (this.isLoading) return;
+    this.isLoading = true;
+    this.isReady = false;
+    this.modelName = model;
+    try {
+      await this._disposeWorker();
+      const workerUrl = new URL("../utils/embeddingWorker.js", import.meta.url);
+      this.worker = new Worker(workerUrl, { type: "module" });
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("\u6A21\u578B\u52A0\u8F7D\u8D85\u65F6\uFF085\u5206\u949F\uFF09")), 3e5);
+        this.worker.onmessage = (e) => {
+          const { type, data, dimensions: dims } = e.data;
+          if (type === "progress" && onProgress) {
+            onProgress(data);
+          } else if (type === "ready") {
+            this.dimensions = dims;
+            this.isReady = true;
+            clearTimeout(timeout);
+            resolve();
+          } else if (type === "error") {
+            clearTimeout(timeout);
+            reject(new Error(e.data.message));
+          } else if (type === "result" || type === "disposed") {
+            const cb = this._pendingCallbacks.get(e.data.id);
+            if (cb) {
+              this._pendingCallbacks.delete(e.data.id);
+              cb.resolve(e.data);
+            }
+          }
+        };
+        this.worker.onerror = (err) => {
+          clearTimeout(timeout);
+          reject(new Error(err.message || "Worker \u52A0\u8F7D\u5931\u8D25"));
+        };
+        this.worker.postMessage({ type: "init", data: { model, dtype: dtype || "q8" } });
+      });
+      this.worker.onmessage = (e) => {
+        const msg = e.data;
+        if (msg.type === "result" || msg.type === "error" || msg.type === "disposed") {
+          const cb = this._pendingCallbacks.get(msg.id);
+          if (cb) {
+            this._pendingCallbacks.delete(msg.id);
+            if (msg.type === "error") cb.reject(new Error(msg.message));
+            else cb.resolve(msg);
+          }
+        }
+      };
+      console.log(`[Horae Vector] \u6A21\u578B\u5DF2\u52A0\u8F7D: ${model} (${this.dimensions}\u7EF4)`);
+    } finally {
+      this.isLoading = false;
+    }
+  }
+  /**
+   * 初始化 API 模式（OpenAI 兼容的 embedding endpoint）
+   */
+  async initApi(url, key, model) {
+    if (this.isLoading) return;
+    this.isLoading = true;
+    this.isReady = false;
+    try {
+      await this._disposeWorker();
+      this.isApiMode = true;
+      this._apiUrl = url.replace(/\/+$/, "");
+      this._apiKey = key;
+      this._apiModel = model;
+      this.modelName = model;
+      const testResult = await this._embedApi(["test"]);
+      if (!testResult?.vectors?.[0]) {
+        throw new Error("API \u8FDE\u63A5\u5931\u8D25\u6216\u8FD4\u56DE\u683C\u5F0F\u5F02\u5E38\uFF0C\u8BF7\u68C0\u67E5\u5730\u5740\u3001\u5BC6\u94A5\u548C\u6A21\u578B\u540D\u79F0\u662F\u5426\u6B63\u786E");
+      }
+      this.dimensions = testResult.vectors[0].length;
+      this.isReady = true;
+      console.log(`[Horae Vector] API \u6A21\u5F0F\u5DF2\u5C31\u7EEA: ${model} (${this.dimensions}\u7EF4)`);
+    } finally {
+      this.isLoading = false;
+    }
+  }
+  async dispose() {
+    await this._disposeWorker();
+    this.vectors.clear();
+    this.termCounts.clear();
+    this.totalDocuments = 0;
+    this.chatId = null;
+    this.isReady = false;
+    this.isApiMode = false;
+    this._apiUrl = "";
+    this._apiKey = "";
+    this._apiModel = "";
+  }
+  async _disposeWorker() {
+    if (this.worker) {
+      try {
+        this.worker.postMessage({ type: "dispose" });
+        await new Promise((r) => setTimeout(r, 200));
+      } catch (_) {
+      }
+      this.worker.terminate();
+      this.worker = null;
+    }
+    this._pendingCallbacks.clear();
+  }
+  /**
+   * 切换聊天：加载对应 chatId 的向量索引
+   */
+  async loadChat(chatId, chat) {
+    this.chatId = chatId;
+    this.vectors.clear();
+    this.termCounts.clear();
+    this.totalDocuments = 0;
+    if (!chatId) return;
+    try {
+      await this._openDB();
+      const stored = await this._loadAllVectors();
+      const storedByHash = /* @__PURE__ */ new Map();
+      for (const item of stored) {
+        storedByHash.set(item.hash, item);
+      }
+      const usedOldIndices = /* @__PURE__ */ new Set();
+      for (let i = 0; i < chat.length; i++) {
+        const msg = chat[i];
+        const meta = msg?.horae_meta;
+        if (!meta || msg.is_user || meta._skipHorae) continue;
+        const doc = this.buildVectorDocument(meta);
+        if (!doc) continue;
+        const hash = this._hashMessage(msg, doc);
+        const existing = storedByHash.get(hash);
+        if (existing) {
+          if (existing.messageIndex !== i) {
+            await this._deleteVector(existing.messageIndex);
+            await this._saveVector(i, { vector: existing.vector, hash, document: doc });
+          }
+          this.vectors.set(i, { vector: existing.vector, hash, document: doc });
+          this._updateTermCounts(doc, 1);
+          this.totalDocuments++;
+          usedOldIndices.add(existing.messageIndex);
+        }
+      }
+      let deletedCount = 0;
+      for (const item of stored) {
+        if (!usedOldIndices.has(item.messageIndex)) {
+          await this._deleteVector(item.messageIndex);
+          deletedCount++;
+        }
+      }
+      if (deletedCount > 0) {
+        console.log(`[Horae Vector] D\u1ECDn d\u1EB9p ${deletedCount} vector c\u0169/b\u1ECB l\u1EC7ch index.`);
+      }
+      console.log(`[Horae Vector] \u0110\xE3 \u0111\u1ED3ng b\u1ED9 ${this.vectors.size} vector (chatId: ${chatId})`);
+    } catch (err) {
+      console.warn("[Horae Vector] L\u1ED7i \u0111\u1ED3ng b\u1ED9 vector:", err);
+    }
+  }
+  _hashMessage(msg, doc) {
+    return this._hashString(doc + (msg.send_date || "") + (msg.mes || ""));
+  }
+  // ========================================
+  // 文档构建
+  // ========================================
+  /**
+   * 将 horae_meta 序列化为检索文本
+   * 事件摘要为核心（占主要权重），场景/角色/NPC 为辅
+   * 去掉物品、服装、心情等噪音，让 embedding 集中在语义关键内容
+   */
+  buildVectorDocument(meta) {
+    if (!meta) return "";
+    const eventTexts = [];
+    if (meta.events?.length > 0) {
+      for (const evt of meta.events) {
+        if (evt.isSummary || evt.level === "\u6458\u8981" || evt._summaryId) continue;
+        if (evt.summary) eventTexts.push(evt.summary);
+      }
+    }
+    const npcTexts = [];
+    if (meta.npcs) {
+      for (const [name, info] of Object.entries(meta.npcs)) {
+        let s = name;
+        if (info.appearance) s += ` ${info.appearance}`;
+        if (info.relationship) s += ` ${info.relationship}`;
+        npcTexts.push(s);
+      }
+    }
+    if (eventTexts.length === 0 && npcTexts.length === 0) return "";
+    const parts = [];
+    for (const t of eventTexts) parts.push(t);
+    for (const t of npcTexts) parts.push(t);
+    if (meta.scene?.location) parts.push(meta.scene.location);
+    const chars = meta.scene?.characters_present || [];
+    if (chars.length > 0) parts.push(chars.join(" "));
+    if (meta.timestamp?.story_date) {
+      parts.push(meta.timestamp.story_time ? `${meta.timestamp.story_date} ${meta.timestamp.story_time}` : meta.timestamp.story_date);
+    }
+    const rpg = meta._rpgChanges;
+    if (rpg) {
+      if (rpg.levels && Object.keys(rpg.levels).length > 0) {
+        for (const [owner, lv] of Object.entries(rpg.levels)) {
+          parts.push(`${owner} \u5347\u7EA7\u81F3Lv.${lv}`);
+        }
+      }
+      for (const eq of rpg.equipment || []) {
+        parts.push(`${eq.owner} \u88C5\u5907\u4E86 ${eq.name}(${eq.slot})`);
+      }
+      for (const u of rpg.unequip || []) {
+        parts.push(`${u.owner} \u5378\u4E0B ${u.name}(${u.slot})`);
+      }
+      for (const bc of rpg.baseChanges || []) {
+        if (bc.field === "level") parts.push(`\u636E\u70B9 ${bc.path} \u5347\u81F3Lv.${bc.value}`);
+      }
+    }
+    return parts.join(" | ");
+  }
+  // ========================================
+  // 索引操作
+  // ========================================
+  async addMessage(messageIndex, meta, msgObj = null) {
+    if (!this.isReady || !this.chatId) return;
+    if (meta?._skipHorae) return;
+    const doc = this.buildVectorDocument(meta);
+    if (!doc) return;
+    const hash = msgObj ? this._hashMessage(msgObj, doc) : this._hashString(doc);
+    const existing = this.vectors.get(messageIndex);
+    if (existing && existing.hash === hash) return;
+    const text = this._prepareText(doc, false);
+    const result = await this._embed([text]);
+    if (!result || !result.vectors?.[0]) return;
+    const vector = result.vectors[0];
+    if (existing) {
+      this._updateTermCounts(existing.document, -1);
+    } else {
+      this.totalDocuments++;
+    }
+    this.vectors.set(messageIndex, { vector, hash, document: doc });
+    this._updateTermCounts(doc, 1);
+    await this._saveVector(messageIndex, { vector, hash, document: doc });
+  }
+  async removeMessage(messageIndex) {
+    const existing = this.vectors.get(messageIndex);
+    if (!existing) return;
+    this._updateTermCounts(existing.document, -1);
+    this.totalDocuments--;
+    this.vectors.delete(messageIndex);
+    await this._deleteVector(messageIndex);
+  }
+  /**
+   * 批量建索引（用于历史记录）
+   * @returns {{ indexed: number, skipped: number }}
+   */
+  async batchIndex(chat, onProgress) {
+    if (!this.isReady || !this.chatId) return { indexed: 0, skipped: 0 };
+    const tasks = [];
+    for (let i = 0; i < chat.length; i++) {
+      const msg = chat[i];
+      const meta = msg.horae_meta;
+      if (!meta || msg.is_user || meta._skipHorae) continue;
+      const doc = this.buildVectorDocument(meta);
+      if (!doc) continue;
+      const hash = this._hashMessage(msg, doc);
+      const existing = this.vectors.get(i);
+      if (existing && existing.hash === hash) continue;
+      tasks.push({ messageIndex: i, document: doc, hash });
+    }
+    if (tasks.length === 0) return { indexed: 0, skipped: chat.length };
+    const batchSize = this.isApiMode ? 8 : 16;
+    let indexed = 0;
+    for (let b = 0; b < tasks.length; b += batchSize) {
+      const batch = tasks.slice(b, b + batchSize);
+      const texts = batch.map((t) => this._prepareText(t.document, false));
+      const result = await this._embed(texts);
+      if (!result?.vectors) continue;
+      for (let j = 0; j < batch.length; j++) {
+        const task = batch[j];
+        const vector = result.vectors[j];
+        if (!vector) continue;
+        const old = this.vectors.get(task.messageIndex);
+        if (old) {
+          this._updateTermCounts(old.document, -1);
+        } else {
+          this.totalDocuments++;
+        }
+        this.vectors.set(task.messageIndex, {
+          vector,
+          hash: task.hash,
+          document: task.document
+        });
+        this._updateTermCounts(task.document, 1);
+        await this._saveVector(task.messageIndex, { vector, hash: task.hash, document: task.document });
+        indexed++;
+      }
+      if (onProgress) {
+        onProgress({ current: Math.min(b + batchSize, tasks.length), total: tasks.length });
+      }
+    }
+    return { indexed, skipped: chat.length - tasks.length };
+  }
+  async clearIndex() {
+    this.vectors.clear();
+    this.termCounts.clear();
+    this.totalDocuments = 0;
+    if (this.chatId) await this._clearVectors();
+  }
+  // ========================================
+  // 查询与召回
+  // ========================================
+  /**
+   * 构建状态查询文本（当前场景/角色/事件）
+   */
+  buildStateQuery(currentState, lastMeta) {
+    const parts = [];
+    if (currentState.scene?.location) parts.push(currentState.scene.location);
+    const chars = currentState.scene?.characters_present || [];
+    for (const c of chars) {
+      parts.push(c);
+      if (currentState.costumes?.[c]) parts.push(currentState.costumes[c]);
+    }
+    if (lastMeta?.events?.length > 0) {
+      for (const evt of lastMeta.events) {
+        if (evt.summary) parts.push(evt.summary);
+      }
+    }
+    return parts.filter(Boolean).join(" ");
+  }
+  /**
+   * 清理用户消息为查询文本
+   */
+  cleanUserMessage(rawMessage) {
+    if (!rawMessage) return "";
+    return rawMessage.replace(/<[^>]*>/g, "").replace(/[\[\]]/g, "").trim().substring(0, 300);
+  }
+  /**
+   * 向量检索
+   * @param {string} queryText
+   * @param {number} topK
+   * @param {number} threshold
+   * @param {Set<number>} excludeIndices - 排除的消息索引（已在上下文中）
+   * @returns {Promise<Array<{messageIndex: number, similarity: number, document: string}>>}
+   */
+  async search(queryText, topK = 5, threshold = 0.72, excludeIndices = /* @__PURE__ */ new Set(), pureMode = false) {
+    if (!this.isReady || !queryText || this.vectors.size === 0) return [];
+    const prepared = this._prepareText(queryText, true);
+    console.log("[Horae Vector] \u5F00\u59CB embedding \u67E5\u8BE2...");
+    const result = await this._embed([prepared]);
+    if (!result?.vectors?.[0]) {
+      console.warn("[Horae Vector] embedding \u8FD4\u56DE\u7A7A\u7ED3\u679C:", result);
+      return [];
+    }
+    const queryVec = result.vectors[0];
+    console.log(`[Horae Vector] \u67E5\u8BE2\u5411\u91CF\u7EF4\u5EA6: ${queryVec.length}\uFF0C\u5F00\u59CB\u5BF9\u6BD4 ${this.vectors.size} \u6761...`);
+    const scored = [];
+    const allScored = [];
+    let searchedCount = 0;
+    for (const [msgIdx, entry] of this.vectors) {
+      if (excludeIndices.has(msgIdx)) continue;
+      searchedCount++;
+      const sim = this._dotProduct(queryVec, entry.vector);
+      allScored.push({ messageIndex: msgIdx, similarity: sim, document: entry.document });
+      if (sim >= threshold) {
+        scored.push({ messageIndex: msgIdx, similarity: sim, document: entry.document });
+      }
+    }
+    allScored.sort((a, b) => b.similarity - a.similarity);
+    const bestSim = allScored.length > 0 ? allScored[0].similarity : 0;
+    console.log(`[Horae Vector] \u641C\u7D22\u4E86 ${searchedCount} \u6761 | \u6700\u9AD8\u76F8\u4F3C\u5EA6=${bestSim.toFixed(4)} | \u8D85\u8FC7\u9608\u503C(${threshold}): ${scored.length} \u6761`);
+    if (scored.length === 0 && allScored.length > 0) {
+      console.log(`[Horae Vector] \u9608\u503C\u4E0B Top-5 \u5019\u9009:`);
+      for (const c of allScored.slice(0, 5)) {
+        console.log(`  #${c.messageIndex} sim=${c.similarity.toFixed(4)} | ${c.document.substring(0, 60)}`);
+      }
+    }
+    scored.sort((a, b) => b.similarity - a.similarity);
+    const adjusted = pureMode ? scored : this._adjustThresholdByFrequency(scored, threshold);
+    if (!pureMode) console.log(`[Horae Vector] \u9891\u7387\u8FC7\u6EE4\u540E: ${adjusted.length} \u6761`);
+    const deduped = this._deduplicateResults(adjusted);
+    console.log(`[Horae Vector] \u53BB\u91CD\u540E: ${deduped.length} \u6761`);
+    return deduped.slice(0, topK);
+  }
+  /**
+   * 策略B：高频内容惩罚
+   * 只在文档中 >80% 的词都是公共词（出现在 >60% 文档中）时才轻微提高阈值，
+   * 避免角色名等必然高频词误杀有效结果。
+   */
+  _adjustThresholdByFrequency(results, baseThreshold) {
+    if (results.length < 2 || this.totalDocuments < 10) return results;
+    return results.filter((r) => {
+      const terms = this._extractKeyTerms(r.document);
+      if (terms.length === 0) return true;
+      let commonCount = 0;
+      for (const term of terms) {
+        const count = this.termCounts.get(term) || 0;
+        if (count / this.totalDocuments > 0.6) commonCount++;
+      }
+      const commonRatio = commonCount / terms.length;
+      if (commonRatio > 0.8) {
+        const penalty = (commonRatio - 0.8) * 0.1;
+        return r.similarity >= baseThreshold + penalty;
+      }
+      return true;
+    });
+  }
+  /**
+   * 策略C：折叠高度相似的结果
+   */
+  _deduplicateResults(results) {
+    if (results.length <= 1) return results;
+    const kept = [results[0]];
+    for (let i = 1; i < results.length; i++) {
+      const candidate = results[i];
+      let isDuplicate = false;
+      for (const existing of kept) {
+        const mutualSim = this._dotProduct(
+          this.vectors.get(existing.messageIndex)?.vector || [],
+          this.vectors.get(candidate.messageIndex)?.vector || []
+        );
+        if (mutualSim > 0.92) {
+          isDuplicate = true;
+          break;
+        }
+      }
+      if (!isDuplicate) kept.push(candidate);
+    }
+    return kept;
+  }
+  // ========================================
+  // 召回 Prompt 构建
+  // ========================================
+  /**
+   * 智能召回：结构化查询 + 向量搜索并行，合并结果
+   */
+  async generateRecallPrompt(horaeManager, skipLast, settings) {
+    const chat = horaeManager.getChat();
+    const state = horaeManager.getLatestState(skipLast);
+    const topK = settings.vectorTopK || 5;
+    const threshold = settings.vectorThreshold ?? 0.72;
+    let rawUserMsg = "";
+    for (let i = chat.length - 1; i >= 0; i--) {
+      if (chat[i].is_user) {
+        rawUserMsg = chat[i].mes || "";
+        break;
+      }
+    }
+    const userQuery = this.cleanUserMessage(rawUserMsg);
+    const EXCLUDE_RECENT = 5;
+    const excludeIndices = /* @__PURE__ */ new Set();
+    for (let i = Math.max(0, chat.length - EXCLUDE_RECENT); i < chat.length; i++) {
+      excludeIndices.add(i);
+    }
+    const merged = /* @__PURE__ */ new Map();
+    const pureMode = !!settings.vectorPureMode;
+    if (pureMode) console.log("[Horae Vector] \u7EAF\u5411\u91CF\u6A21\u5F0F\u5DF2\u542F\u7528\uFF0C\u8DF3\u8FC7\u5173\u952E\u8BCD\u542F\u53D1\u5F0F");
+    const structuredResults = this._structuredQuery(userQuery, chat, state, excludeIndices, topK, pureMode);
+    console.log(`[Horae Vector] \u7ED3\u6784\u5316\u67E5\u8BE2: ${structuredResults.length} \u6761\u547D\u4E2D`);
+    for (const r of structuredResults) {
+      merged.set(r.messageIndex, r);
+    }
+    const hybridResults = await this._hybridSearch(userQuery, state, horaeManager, skipLast, settings, excludeIndices, topK, threshold, pureMode);
+    console.log(`[Horae Vector] \u5411\u91CF\u6DF7\u5408\u641C\u7D22: ${hybridResults.length} \u6761\u547D\u4E2D`);
+    for (const r of hybridResults) {
+      if (!merged.has(r.messageIndex)) {
+        merged.set(r.messageIndex, r);
+      }
+    }
+    const relevantChars = new Set(state.scene?.characters_present || []);
+    const allKnownChars = /* @__PURE__ */ new Set();
+    for (let i = 0; i < chat.length; i++) {
+      const m = chat[i].horae_meta;
+      if (!m) continue;
+      (m.scene?.characters_present || []).forEach((c) => allKnownChars.add(c));
+      if (m.npcs) Object.keys(m.npcs).forEach((c) => allKnownChars.add(c));
+    }
+    for (const c of allKnownChars) {
+      if (userQuery && userQuery.includes(c)) relevantChars.add(c);
+    }
+    let results = Array.from(merged.values());
+    if (relevantChars.size > 0) {
+      for (const r of results) {
+        const meta = chat[r.messageIndex]?.horae_meta;
+        if (!meta) continue;
+        const docChars = /* @__PURE__ */ new Set([
+          ...meta.scene?.characters_present || [],
+          ...Object.keys(meta.npcs || {})
+        ]);
+        let hasRelevant = false;
+        for (const c of relevantChars) {
+          if (docChars.has(c)) {
+            hasRelevant = true;
+            break;
+          }
+        }
+        if (hasRelevant) {
+          r.similarity += 0.03;
+        }
+      }
+      console.log(`[Horae Vector] \u89D2\u8272\u52A0\u6743: \u76F8\u5173\u89D2\u8272=[${[...relevantChars].join(",")}]`);
+    }
+    results.sort((a, b) => b.similarity - a.similarity);
+    if (settings.vectorRerankEnabled && settings.vectorRerankModel && results.length > 1) {
+      const rerankCandidates = results.slice(0, topK * 3);
+      const rerankQuery = userQuery || this.buildStateQuery(state, null);
+      if (rerankQuery) {
+        try {
+          const useFullText = !!settings.vectorRerankFullText;
+          const _stripTags = settings.vectorStripTags || "";
+          const rerankDocs = rerankCandidates.map((r) => {
+            if (useFullText) {
+              const fullText = this._extractCleanText(chat[r.messageIndex]?.mes, _stripTags);
+              return fullText || r.document;
+            }
+            return r.document;
+          });
+          console.log(`[Horae Vector] Rerank \u6A21\u5F0F: ${useFullText ? "\u5168\u6587\u7CBE\u6392" : "\u6458\u8981\u6392\u5E8F"}`);
+          const reranked = await this._rerank(
+            rerankQuery,
+            rerankDocs,
+            topK,
+            settings
+          );
+          if (reranked && reranked.length > 0) {
+            console.log(`[Horae Vector] Rerank \u5B8C\u6210: ${reranked.length} \u6761`);
+            results = reranked.map((rr) => {
+              const original = rerankCandidates[rr.index];
+              return {
+                ...original,
+                similarity: rr.relevance_score,
+                source: original.source + (useFullText ? "+rerank-full" : "+rerank")
+              };
+            });
+          }
+        } catch (err) {
+          console.warn("[Horae Vector] Rerank \u5931\u8D25\uFF0C\u4F7F\u7528\u539F\u59CB\u6392\u5E8F:", err.message);
+        }
+      }
+    }
+    results = results.slice(0, topK);
+    for (const r of results) {
+      const meta = chat[r.messageIndex]?.horae_meta;
+      if (meta && meta.events) {
+        meta.events.forEach((e) => {
+          e.accessCount = (e.accessCount || 0) + 1;
+        });
+      }
+    }
+    console.log(`[Horae Vector] === \u6700\u7EC8\u5408\u5E76: ${results.length} \u6761 ===`);
+    for (const r of results) {
+      console.log(`  #${r.messageIndex} sim=${r.similarity.toFixed(3)} [${r.source}]`);
+    }
+    if (results.length === 0) return "";
+    const currentDate = state.timestamp?.story_date;
+    const fullTextCount = Math.min(settings.vectorFullTextCount ?? 3, topK);
+    const fullTextThreshold = settings.vectorFullTextThreshold ?? 0.9;
+    const recallText = this._buildRecallText(results, currentDate, chat, fullTextCount, fullTextThreshold, settings.vectorStripTags || "");
+    console.log(`[Horae Vector] \u53EC\u56DE\u6587\u672C (${recallText.length}\u5B57):
+${recallText}`);
+    return recallText;
+  }
+  // ========================================
+  // 结构化查询（精准，不需要向量）
+  // ========================================
+  /**
+   * 从用户消息解析意图，直接查询 horae_meta 结构化数据
+   */
+  _structuredQuery(userQuery, chat, state, excludeIndices, topK, pureMode = false) {
+    if (!userQuery || chat.length === 0) return [];
+    const knownChars = /* @__PURE__ */ new Set();
+    for (let i = 0; i < chat.length; i++) {
+      const m = chat[i].horae_meta;
+      if (!m) continue;
+      (m.scene?.characters_present || []).forEach((c) => knownChars.add(c));
+      if (m.npcs) Object.keys(m.npcs).forEach((c) => knownChars.add(c));
+    }
+    const mentionedChars = [];
+    for (const c of knownChars) {
+      if (userQuery.includes(c)) mentionedChars.push(c);
+    }
+    const isFirst = /第一次|初次|首次|初见|初見|初遇|最早|一开始|一開始/.test(userQuery);
+    const isLast = /上次|上一次|最后一次|最後一次|最近一次|之前/.test(userQuery);
+    const hasCostumeKw = /穿|戴|换|換|衣|裙|裤|褲|袍|衫|装|裝|鞋/.test(userQuery);
+    const hasMoodKw = /生气|生氣|愤怒|憤怒|开心|開心|高兴|高興|难过|難過|伤心|傷心|哭|害怕|恐惧|恐懼|害羞|羞耻|羞恥|得意|满足|滿足|嫉妒|悲伤|悲傷|焦虑|焦慮|紧张|緊張|兴奋|興奮|感动|感動|温柔|溫柔|冷漠/.test(userQuery);
+    const hasGiftKw = /礼物|禮物|赠送|贈送|送给|送給|送的|信物|定情|收到|收下|转赠|轉贈|聘礼|聘禮|嫁妆|嫁妝|纪念品|紀念品|贺卡|賀卡/.test(userQuery);
+    const hasImportantItemKw = /重要.{0,2}(物品|东西|東西|道具|宝物|寶物)|关键.{0,2}(物品|东西|東西|道具|宝物|寶物)|關鍵.{0,2}(物品|東西|道具|寶物)|珍贵|珍貴|宝贝|寶貝|宝物|寶物|神器|秘宝|秘寶|圣物|聖物/.test(userQuery);
+    const hasImportantEventKw = /重要.{0,2}(事|事件|经历|經歷)|关键.{0,2}(事|事件|转折|轉折)|關鍵.{0,2}(事|事件|轉折)|大事|转折|轉折|里程碑/.test(userQuery);
+    const hasCeremonyKw = /婚礼|婚禮|葬礼|葬禮|仪式|儀式|典礼|典禮|庆典|慶典|节日|節日|祭祀|加冕|册封|冊封|宣誓|洗礼|洗禮|成人礼|成人禮|庆祝|慶祝|宴会|宴會|舞会|舞會|祭典/.test(userQuery);
+    const hasPromiseKw = /承诺|承諾|誓言|约定|約定|保证|保證|发誓|發誓|立誓|契约|契約|盟约|盟約|许诺|許諾/.test(userQuery);
+    const hasLossKw = /死亡|去世|牺牲|犧牲|离别|離別|分离|分離|告别|告別|失去|消失|陨落|隕落|永别|永別|诀别|訣別|阵亡|陣亡/.test(userQuery);
+    const hasRevelationKw = /秘密|真相|揭露|坦白|暴露|真实身份|真實身份|隐瞒|隱瞞|谎言|謊言|欺骗|欺騙|伪装|偽裝|冒充|真名|血统|血統|身世|揭穿/.test(userQuery);
+    const hasPowerKw = /觉醒|覺醒|升级|升級|进化|進化|突破|衰退|失去能力|解封|封印|变身|變身|异变|異變|获得力量|獲得力量|血脉|血脈|继承|繼承|传承|傳承|领悟|領悟/.test(userQuery);
+    const results = [];
+    if (isFirst && mentionedChars.length > 0) {
+      for (const charName of mentionedChars) {
+        const idx = this._findFirstAppearance(chat, charName, excludeIndices);
+        if (idx !== -1) {
+          results.push({ messageIndex: idx, similarity: 1, document: `[\u7ED3\u6784\u5316] ${charName}\u9996\u6B21\u51FA\u73B0`, source: "structured" });
+          console.log(`[Horae Vector] \u7ED3\u6784\u5316\u67E5\u8BE2: "${charName}" \u9996\u6B21\u51FA\u73B0\u4E8E #${idx}`);
+        }
+      }
+    }
+    if (isLast && mentionedChars.length > 0 && hasCostumeKw) {
+      const costumeKw = this._extractCostumeKeywords(userQuery, mentionedChars);
+      if (costumeKw) {
+        for (const charName of mentionedChars) {
+          const idx = this._findLastCostume(chat, charName, costumeKw, excludeIndices);
+          if (idx !== -1) {
+            results.push({ messageIndex: idx, similarity: 1, document: `[\u7ED3\u6784\u5316] ${charName}\u7A7F${costumeKw}`, source: "structured" });
+            console.log(`[Horae Vector] \u7ED3\u6784\u5316\u67E5\u8BE2: "${charName}" \u4E0A\u6B21\u7A7F "${costumeKw}" \u4E8E #${idx}`);
+          }
+        }
+      }
+    }
+    if (hasCostumeKw && !isFirst && !isLast && mentionedChars.length === 0) {
+      const costumeKw = this._extractCostumeKeywords(userQuery, []);
+      if (costumeKw) {
+        const matches = this._findCostumeMatches(chat, costumeKw, excludeIndices, topK);
+        for (const m of matches) {
+          results.push({ messageIndex: m.idx, similarity: 0.95, document: `[\u7ED3\u6784\u5316] \u670D\u88C5\u5339\u914D:${costumeKw}`, source: "structured" });
+        }
+      }
+    }
+    if (isLast && hasMoodKw) {
+      const moodKw = this._extractMoodKeyword(userQuery);
+      if (moodKw) {
+        const targetChar = mentionedChars[0] || null;
+        const idx = this._findLastMood(chat, targetChar, moodKw, excludeIndices);
+        if (idx !== -1) {
+          results.push({ messageIndex: idx, similarity: 1, document: `[\u7ED3\u6784\u5316] \u60C5\u7EEA\u5339\u914D:${moodKw}`, source: "structured" });
+          console.log(`[Horae Vector] \u7ED3\u6784\u5316\u67E5\u8BE2: \u4E0A\u6B21 "${moodKw}" \u4E8E #${idx}`);
+        }
+      }
+    }
+    if (hasGiftKw) {
+      const giftResults = this._findGiftItems(chat, mentionedChars, excludeIndices, topK);
+      for (const r of giftResults) {
+        results.push(r);
+        console.log(`[Horae Vector] \u7ED3\u6784\u5316\u67E5\u8BE2: \u793C\u7269/\u8D60\u54C1 #${r.messageIndex} [${r.document}]`);
+      }
+    }
+    if (hasImportantItemKw) {
+      const impResults = this._findImportantItems(chat, excludeIndices, topK);
+      for (const r of impResults) {
+        results.push(r);
+        console.log(`[Horae Vector] \u7ED3\u6784\u5316\u67E5\u8BE2: \u91CD\u8981\u7269\u54C1 #${r.messageIndex} [${r.document}]`);
+      }
+    }
+    if (hasImportantEventKw) {
+      const evtResults = this._findImportantEvents(chat, excludeIndices, topK);
+      for (const r of evtResults) {
+        results.push(r);
+        console.log(`[Horae Vector] \u7ED3\u6784\u5316\u67E5\u8BE2: \u91CD\u8981\u4E8B\u4EF6 #${r.messageIndex} [${r.document}]`);
+      }
+    }
+    if (!pureMode) {
+      if (hasCeremonyKw || hasPromiseKw || hasLossKw || hasRevelationKw || hasPowerKw) {
+        const thematicResults = this._findThematicEvents(chat, {
+          ceremony: hasCeremonyKw,
+          promise: hasPromiseKw,
+          loss: hasLossKw,
+          revelation: hasRevelationKw,
+          power: hasPowerKw
+        }, excludeIndices, topK);
+        for (const r of thematicResults) {
+          results.push(r);
+          console.log(`[Horae Vector] \u7ED3\u6784\u5316\u67E5\u8BE2: \u4E3B\u9898\u4E8B\u4EF6 #${r.messageIndex} [${r.document}]`);
+        }
+      }
+      const existingIds = new Set(results.map((r) => r.messageIndex));
+      const eventMatches = this._eventKeywordSearch(userQuery, chat, mentionedChars, existingIds, excludeIndices, topK);
+      for (const m of eventMatches) {
+        results.push(m);
+      }
+    }
+    const withContext = this._expandContextWindow(results, chat, excludeIndices);
+    return withContext.slice(0, topK);
+  }
+  /**
+   * 上下文窗口扩展：对每个命中消息，把前后相邻的 AI 消息也加进来
+   * RP 中相邻消息是连续事件，天然相关
+   */
+  _expandContextWindow(results, chat, excludeIndices) {
+    const resultIds = new Set(results.map((r) => r.messageIndex));
+    const contextToAdd = [];
+    for (const r of results) {
+      const idx = r.messageIndex;
+      for (let i = idx - 1; i >= Math.max(0, idx - 3); i--) {
+        if (excludeIndices.has(i) || resultIds.has(i)) continue;
+        const m = chat[i].horae_meta;
+        if (!chat[i].is_user && this._hasOriginalEvents(m)) {
+          contextToAdd.push({
+            messageIndex: i,
+            similarity: r.similarity * 0.85,
+            document: `[\u4E0A\u6587] #${idx}\u7684\u524D\u7F6E\u4E8B\u4EF6`,
+            source: "context"
+          });
+          resultIds.add(i);
+          break;
+        }
+      }
+      for (let i = idx + 1; i <= Math.min(chat.length - 1, idx + 3); i++) {
+        if (excludeIndices.has(i) || resultIds.has(i)) continue;
+        const m = chat[i].horae_meta;
+        if (!chat[i].is_user && this._hasOriginalEvents(m)) {
+          contextToAdd.push({
+            messageIndex: i,
+            similarity: r.similarity * 0.85,
+            document: `[\u4E0B\u6587] #${idx}\u7684\u540E\u7EED\u4E8B\u4EF6`,
+            source: "context"
+          });
+          resultIds.add(i);
+          break;
+        }
+      }
+    }
+    if (contextToAdd.length > 0) {
+      console.log(`[Horae Vector] \u4E0A\u4E0B\u6587\u6269\u5C55: +${contextToAdd.length} \u6761`);
+      for (const c of contextToAdd) console.log(`  #${c.messageIndex} [${c.document}]`);
+    }
+    const all = [...results, ...contextToAdd];
+    all.sort((a, b) => b.similarity - a.similarity);
+    return all;
+  }
+  /**
+   * 事件关键词搜索：从用户文本直接扫描已知类别词汇，扩展后搜索事件摘要
+   */
+  _eventKeywordSearch(userQuery, chat, mentionedChars, skipIds, excludeIndices, limit) {
+    const detected = this._detectCategoryTerms(userQuery);
+    if (detected.length === 0) return [];
+    const expanded = this._expandByCategory(detected);
+    console.log(`[Horae Vector] \u4E8B\u4EF6\u641C\u7D22: \u68C0\u6D4B\u5230=[${detected.join(",")}] \u6269\u5C55\u540E=[${expanded.join(",")}]`);
+    const scored = [];
+    for (let i = 0; i < chat.length; i++) {
+      if (excludeIndices.has(i) || skipIds.has(i)) continue;
+      const meta = chat[i].horae_meta;
+      if (!meta) continue;
+      const searchText = this._buildSearchableText(meta);
+      if (!searchText) continue;
+      let matchCount = 0;
+      const matched = [];
+      for (const kw of expanded) {
+        if (searchText.includes(kw)) {
+          matchCount++;
+          matched.push(kw);
+        }
+      }
+      if (matchCount >= 2 || matchCount >= 1 && mentionedChars.some((c) => searchText.includes(c))) {
+        scored.push({
+          messageIndex: i,
+          similarity: 0.85 + matchCount * 0.02,
+          document: `[\u4E8B\u4EF6\u5339\u914D] ${matched.join(",")}`,
+          source: "structured",
+          _matchCount: matchCount
+        });
+      }
+    }
+    scored.sort((a, b) => b._matchCount - a._matchCount || b.similarity - a.similarity);
+    const top = scored.slice(0, limit);
+    if (top.length > 0) {
+      console.log(`[Horae Vector] \u4E8B\u4EF6\u641C\u7D22\u547D\u4E2D ${top.length} \u6761:`);
+      for (const r of top) console.log(`  #${r.messageIndex} matches=${r._matchCount} [${r.document}]`);
+    }
+    return top;
+  }
+  _buildSearchableText(meta) {
+    const parts = [];
+    if (meta.events) {
+      for (const evt of meta.events) {
+        if (evt.isSummary || evt.level === "\u6458\u8981" || evt._summaryId) continue;
+        if (evt.summary) parts.push(evt.summary);
+      }
+    }
+    if (meta.scene?.location) parts.push(meta.scene.location);
+    if (meta.npcs) {
+      for (const [name, info] of Object.entries(meta.npcs)) {
+        parts.push(name);
+        if (info.description) parts.push(info.description);
+      }
+    }
+    if (meta.items) {
+      for (const [name, info] of Object.entries(meta.items)) {
+        parts.push(name);
+        if (info.location) parts.push(info.location);
+      }
+    }
+    return parts.join(" ");
+  }
+  /**
+   * 直接从用户文本中扫描 TERM_CATEGORIES 中的已知词汇（无需分词）
+   */
+  _detectCategoryTerms(text) {
+    const normalized = t2s(text);
+    const found = [];
+    for (const terms of Object.values(TERM_CATEGORIES)) {
+      for (const term of terms) {
+        if (normalized.includes(term)) {
+          found.push(term);
+        }
+      }
+    }
+    return [...new Set(found)];
+  }
+  /**
+   * 将检测到的词扩展到同类别的所有词
+   */
+  _expandByCategory(keywords) {
+    const expanded = new Set(keywords);
+    for (const kw of keywords) {
+      for (const terms of Object.values(TERM_CATEGORIES)) {
+        if (terms.includes(kw)) {
+          for (const t of terms) expanded.add(t);
+        }
+      }
+    }
+    return [...expanded];
+  }
+  _findFirstAppearance(chat, charName, excludeIndices) {
+    for (let i = 0; i < chat.length; i++) {
+      if (excludeIndices.has(i)) continue;
+      const m = chat[i].horae_meta;
+      if (!m) continue;
+      if (m.npcs && m.npcs[charName]) return i;
+      if (m.scene?.characters_present?.includes(charName)) return i;
+    }
+    return -1;
+  }
+  _findLastCostume(chat, charName, costumeKw, excludeIndices) {
+    for (let i = chat.length - 1; i >= 0; i--) {
+      if (excludeIndices.has(i)) continue;
+      const costume = chat[i].horae_meta?.costumes?.[charName];
+      if (costume && costume.includes(costumeKw)) return i;
+    }
+    return -1;
+  }
+  _findCostumeMatches(chat, costumeKw, excludeIndices, limit) {
+    const matches = [];
+    for (let i = chat.length - 1; i >= 0 && matches.length < limit; i--) {
+      if (excludeIndices.has(i)) continue;
+      const costumes = chat[i].horae_meta?.costumes;
+      if (!costumes) continue;
+      for (const v of Object.values(costumes)) {
+        if (v && v.includes(costumeKw)) {
+          matches.push({ idx: i });
+          break;
+        }
+      }
+    }
+    return matches;
+  }
+  _findLastMood(chat, charName, moodKw, excludeIndices) {
+    for (let i = chat.length - 1; i >= 0; i--) {
+      if (excludeIndices.has(i)) continue;
+      const mood = chat[i].horae_meta?.mood;
+      if (!mood) continue;
+      if (charName) {
+        if (mood[charName] && mood[charName].includes(moodKw)) return i;
+      } else {
+        for (const v of Object.values(mood)) {
+          if (v && v.includes(moodKw)) return i;
+        }
+      }
+    }
+    return -1;
+  }
+  _extractCostumeKeywords(query, chars) {
+    let cleaned = query;
+    for (const c of chars) cleaned = cleaned.replace(c, "");
+    cleaned = cleaned.replace(/上次|上一次|最后一次|之前|穿|戴|换|的|了|过|着|那件|那套|那个/g, "").trim();
+    return cleaned.length >= 2 ? cleaned : "";
+  }
+  _extractMoodKeyword(query) {
+    const moodWords = ["\u751F\u6C14", "\u6124\u6012", "\u5F00\u5FC3", "\u9AD8\u5174", "\u96BE\u8FC7", "\u4F24\u5FC3", "\u54ED\u6CE3", "\u5BB3\u6015", "\u6050\u60E7", "\u5BB3\u7F9E", "\u7F9E\u803B", "\u5F97\u610F", "\u6EE1\u8DB3", "\u5AC9\u5992", "\u60B2\u4F24", "\u7126\u8651", "\u7D27\u5F20", "\u5174\u594B", "\u611F\u52A8", "\u6E29\u67D4", "\u51B7\u6F20", "\u66B4\u6012", "\u59D4\u5C48", "\u5931\u843D"];
+    for (const w of moodWords) {
+      if (query.includes(w)) return w;
+    }
+    return "";
+  }
+  /**
+   * 查找与礼物/赠品相关的消息
+   * 通过 item.holder 变化或事件文本中的赠送关键词定位
+   */
+  _findGiftItems(chat, mentionedChars, excludeIndices, limit) {
+    const giftKws = ["\u8D60\u9001", "\u9001\u7ED9", "\u6536\u5230", "\u6536\u4E0B", "\u8F6C\u8D60", "\u4FE1\u7269", "\u5B9A\u60C5", "\u793C\u7269", "\u8058\u793C", "\u5AC1\u5986"];
+    const results = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (let i = chat.length - 1; i >= 0 && results.length < limit; i--) {
+      if (excludeIndices.has(i) || seen.has(i)) continue;
+      const meta = chat[i].horae_meta;
+      if (!meta) continue;
+      let matched = false;
+      const matchedItems = [];
+      if (meta.items) {
+        for (const [name, info] of Object.entries(meta.items)) {
+          const imp = info.importance || "";
+          const holder = info.holder || "";
+          const holderMatchesChar = mentionedChars.length === 0 || mentionedChars.some((c) => holder.includes(c));
+          if ((imp === "!" || imp === "!!") && holderMatchesChar) {
+            matched = true;
+            matchedItems.push(`${imp === "!!" ? "\u5173\u952E" : "\u91CD\u8981"}:${name}`);
+          }
+        }
+      }
+      if (!matched && meta.events) {
+        for (const evt of meta.events) {
+          if (evt.isSummary || evt.level === "\u6458\u8981" || evt._summaryId) continue;
+          const text = evt.summary || "";
+          if (giftKws.some((kw) => text.includes(kw))) {
+            if (mentionedChars.length === 0 || mentionedChars.some((c) => text.includes(c))) {
+              matched = true;
+              matchedItems.push(text.substring(0, 20));
+            }
+          }
+        }
+      }
+      if (matched) {
+        seen.add(i);
+        results.push({
+          messageIndex: i,
+          similarity: 0.95,
+          document: `[\u7ED3\u6784\u5316] \u793C\u7269/\u8D60\u54C1: ${matchedItems.join("; ")}`,
+          source: "structured"
+        });
+      }
+    }
+    return results;
+  }
+  /**
+   * 查找包含重要/关键物品的消息（importance '!' 或 '!!'）
+   */
+  _findImportantItems(chat, excludeIndices, limit) {
+    const results = [];
+    for (let i = chat.length - 1; i >= 0 && results.length < limit; i--) {
+      if (excludeIndices.has(i)) continue;
+      const meta = chat[i].horae_meta;
+      if (!meta?.items) continue;
+      const importantNames = [];
+      for (const [name, info] of Object.entries(meta.items)) {
+        if (info.importance === "!" || info.importance === "!!") {
+          importantNames.push(`${info.importance === "!!" ? "\u2605" : "\u2606"}${info.icon || ""}${name}`);
+        }
+      }
+      if (importantNames.length > 0) {
+        results.push({
+          messageIndex: i,
+          similarity: 0.95,
+          document: `[\u7ED3\u6784\u5316] \u91CD\u8981\u7269\u54C1: ${importantNames.join(", ")}`,
+          source: "structured"
+        });
+      }
+    }
+    return results;
+  }
+  /**
+   * 查找重要/关键级别的事件
+   */
+  _findImportantEvents(chat, excludeIndices, limit) {
+    const results = [];
+    for (let i = chat.length - 1; i >= 0 && results.length < limit; i--) {
+      if (excludeIndices.has(i)) continue;
+      const meta = chat[i].horae_meta;
+      if (!meta?.events) continue;
+      for (const evt of meta.events) {
+        if (evt.isSummary || evt.level === "\u6458\u8981" || evt._summaryId) continue;
+        if (evt.level === "\u91CD\u8981" || evt.level === "\u5173\u952E" || evt.level === "\u95DC\u9375") {
+          results.push({
+            messageIndex: i,
+            similarity: evt.level === "\u5173\u952E" || evt.level === "\u95DC\u9375" ? 1 : 0.95,
+            document: `[\u7ED3\u6784\u5316] ${evt.level}\u4E8B\u4EF6: ${(evt.summary || "").substring(0, 30)}`,
+            source: "structured"
+          });
+          break;
+        }
+      }
+    }
+    return results;
+  }
+  /**
+   * 主题事件搜索：仪式/承诺/失去/揭露/能力变化
+   * 结合事件文本和 TERM_CATEGORIES 做精准匹配
+   */
+  _findThematicEvents(chat, flags, excludeIndices, limit) {
+    const activeCategories = [];
+    if (flags.ceremony) activeCategories.push("ceremony");
+    if (flags.promise) activeCategories.push("promise");
+    if (flags.loss) activeCategories.push("loss");
+    if (flags.revelation) activeCategories.push("revelation");
+    if (flags.power) activeCategories.push("power");
+    const searchTerms = /* @__PURE__ */ new Set();
+    for (const cat of activeCategories) {
+      if (TERM_CATEGORIES[cat]) {
+        for (const t of TERM_CATEGORIES[cat]) searchTerms.add(t);
+      }
+    }
+    if (searchTerms.size === 0) return [];
+    const results = [];
+    for (let i = chat.length - 1; i >= 0 && results.length < limit; i--) {
+      if (excludeIndices.has(i)) continue;
+      const meta = chat[i].horae_meta;
+      if (!meta?.events) continue;
+      for (const evt of meta.events) {
+        if (evt.isSummary || evt.level === "\u6458\u8981" || evt._summaryId) continue;
+        const text = t2s(evt.summary || "");
+        const hits = [...searchTerms].filter((t) => text.includes(t));
+        if (hits.length > 0) {
+          results.push({
+            messageIndex: i,
+            similarity: 0.9 + Math.min(hits.length, 5) * 0.02,
+            document: `[\u7ED3\u6784\u5316] \u4E3B\u9898\u4E8B\u4EF6(${activeCategories.join("+")}): ${hits.join(",")}`,
+            source: "structured"
+          });
+          break;
+        }
+      }
+    }
+    return results;
+  }
+  // ========================================
+  // 向量+关键词混合搜索（兜底）
+  // ========================================
+  async _hybridSearch(userQuery, state, horaeManager, skipLast, settings, excludeIndices, topK, threshold, pureMode = false) {
+    if (!this.isReady || this.vectors.size === 0) return [];
+    const lastIdx = Math.max(0, horaeManager.getChat().length - 1 - skipLast);
+    const lastMeta = horaeManager.getMessageMeta(lastIdx);
+    const stateQuery = this.buildStateQuery(state, lastMeta);
+    const merged = /* @__PURE__ */ new Map();
+    if (userQuery) {
+      const intentThreshold = Math.max(threshold - 0.25, 0.4);
+      const intentResults = await this.search(userQuery, topK * 2, intentThreshold, excludeIndices, pureMode);
+      console.log(`[Horae Vector] \u610F\u56FE\u641C\u7D22: ${intentResults.length} \u6761`);
+      for (const r of intentResults) {
+        merged.set(r.messageIndex, { ...r, source: "intent" });
+      }
+    }
+    if (stateQuery) {
+      const stateResults = await this.search(stateQuery, topK * 2, threshold, excludeIndices, pureMode);
+      console.log(`[Horae Vector] \u72B6\u6001\u641C\u7D22: ${stateResults.length} \u6761`);
+      for (const r of stateResults) {
+        const existing = merged.get(r.messageIndex);
+        if (!existing || r.similarity > existing.similarity) {
+          merged.set(r.messageIndex, { ...r, source: existing ? "both" : "state" });
+        }
+      }
+    }
+    let results = Array.from(merged.values());
+    results.sort((a, b) => b.similarity - a.similarity);
+    results = this._deduplicateResults(results).slice(0, topK);
+    const chat = horaeManager.getChat();
+    if (settings.vectorDiffusionEnabled === false) {
+      console.log("[Horae Vector] Graph Diffusion: T\u1EAET (b\u1EDFi c\xE0i \u0111\u1EB7t ng\u01B0\u1EDDi d\xF9ng)");
+      return results;
+    }
+    if (settings.bmeEnabled === false) {
+      const diffusionMap = /* @__PURE__ */ new Map();
+      for (const r of results) diffusionMap.set(r.messageIndex, r);
+      console.log("[Horae Vector] BME Engine: T\u1EAET, d\xF9ng k\u1EBFt qu\u1EA3 vector thu\u1EA7n");
+      return results;
+    }
+    try {
+      const graph = loadGraphFromChat(chat);
+      const syncStats = syncMetaToGraph(graph, chat);
+      if (syncStats.nodesCreated > 0) {
+        console.log(`[Horae BME] \u0110\u1ED3ng b\u1ED9 \u0111\u1ED3 th\u1ECB: +${syncStats.nodesCreated} n\xFAt, +${syncStats.edgesCreated} c\u1EA1nh (t\u1ED5ng: ${graph.nodes.length} n\xFAt, ${graph.edges.length} c\u1EA1nh)`);
+      }
+      const adjMap = buildTemporalAdjacencyMap(graph);
+      const seeds = vectorResultsToSeeds(graph, results);
+      if (seeds.length === 0) {
+        console.log("[Horae BME] Kh\xF4ng c\xF3 n\xFAt h\u1EA1t gi\u1ED1ng n\xE0o, b\u1ECF qua khu\u1EBFch t\xE1n");
+        saveGraphToChat(chat, graph);
+        return results;
+      }
+      const diffusionOpts = {
+        maxSteps: settings.bmeDiffusionSteps ?? 2,
+        decayFactor: settings.bmeDiffusionDecay ?? 0.6,
+        topK: 100
+      };
+      const diffusionResults = diffuseAndRank(adjMap, seeds, diffusionOpts);
+      console.log(`[Horae BME] PEDSA khu\u1EBFch t\xE1n: ${seeds.length} h\u1EA1t gi\u1ED1ng \u2192 ${diffusionResults.length} n\xFAt k\xEDch ho\u1EA1t`);
+      const vectorScoreByMsg = /* @__PURE__ */ new Map();
+      for (const r of results) {
+        vectorScoreByMsg.set(r.messageIndex, r.similarity);
+      }
+      const msgMap = diffusionResultsToMessages(graph, diffusionResults);
+      const hybridWeights = {
+        graphWeight: settings.bmeGraphWeight ?? 0.6,
+        vectorWeight: settings.bmeVectorWeight ?? 0.3,
+        importanceWeight: settings.bmeImportanceWeight ?? 0.1
+      };
+      const finalMap = /* @__PURE__ */ new Map();
+      for (const r of results) {
+        finalMap.set(r.messageIndex, { ...r });
+      }
+      for (const [msgIdx, dr] of msgMap) {
+        if (excludeIndices.has(msgIdx)) continue;
+        const existing = finalMap.get(msgIdx);
+        const vecScore = vectorScoreByMsg.get(msgIdx) || 0;
+        const baseScore = hybridScore({
+          graphScore: dr.energy,
+          vectorScore: vecScore,
+          importance: dr.node?.importance || 5,
+          createdTime: dr.node?.createdTime || Date.now()
+        }, hybridWeights);
+        let scopeWeight = 1;
+        let timelineWeight = 1;
+        if (settings.bmeScopedMemoryEnabled !== false && graph.knowledgeState) {
+          const ks = normalizeGraphCognitiveState(graph);
+          scopeWeight = classifyNodeScopeBucket(dr.node, ks).weight;
+        }
+        if (settings.bmeStoryTimelineEnabled !== false && graph.knowledgeState?.activeStoryTime && dr.node?.storyTime) {
+          const bucket = classifyStoryTemporalBucket(graph, dr.node, graph.knowledgeState.activeStoryTime.segmentId);
+          timelineWeight = resolveTemporalBucketWeight(bucket, settings);
+        }
+        const score = baseScore * scopeWeight * timelineWeight;
+        const meta = chat[msgIdx]?.horae_meta;
+        const doc = meta?.events?.map((e) => e.summary).filter(Boolean).join(" ") || "";
+        if (existing) {
+          existing.similarity = Math.max(existing.similarity, score);
+          existing.source = existing.source + "+bme";
+        } else if (doc) {
+          finalMap.set(msgIdx, {
+            messageIndex: msgIdx,
+            similarity: score,
+            document: doc,
+            source: "bme_diffusion"
+          });
+        }
+      }
+      const accessedNodes = [];
+      for (const r of results) {
+        const nodes = graph.nodes.filter((n) => !n.archived && n.seq === r.messageIndex);
+        accessedNodes.push(...nodes);
+      }
+      if (accessedNodes.length > 0) {
+        reinforceAccessBatch(accessedNodes);
+      }
+      saveGraphToChat(chat, graph);
+      let finalResults = Array.from(finalMap.values());
+      finalResults.sort((a, b) => b.similarity - a.similarity);
+      finalResults = this._deduplicateResults(finalResults).slice(0, Math.floor(topK * 1.5));
+      console.log(`[Horae BME] Khu\u1EBFch t\xE1n \u0111\u1ED3 th\u1ECB (PEDSA): ${finalResults.length} k\u1EBFt qu\u1EA3`);
+      for (const r of finalResults) {
+        console.log(`  #${r.messageIndex} sim=${r.similarity.toFixed(4)} [${r.source}] | ${(r.document || "").substring(0, 80)}`);
+      }
+      return finalResults;
+    } catch (err) {
+      console.warn("[Horae BME] L\u1ED7i khu\u1EBFch t\xE1n PEDSA, fallback v\u1EC1 k\u1EBFt qu\u1EA3 vector:", err);
+      return results;
+    }
+  }
+  _buildRecallText(results, currentDate, chat, fullTextCount = 3, fullTextThreshold = 0.9, stripTags = "") {
+    const lines = ["[\u8BB0\u5FC6\u56DE\u6EAF\u2014\u2014\u4EE5\u4E0B\u4E3A\u4E0E\u5F53\u524D\u60C5\u5883\u76F8\u5173\u7684\u5386\u53F2\u7247\u6BB5\uFF0C\u4EC5\u4F9B\u53C2\u8003\uFF0C\u975E\u5F53\u524D\u4E0A\u4E0B\u6587]"];
+    for (let rank = 0; rank < results.length; rank++) {
+      const r = results[rank];
+      const meta = chat[r.messageIndex]?.horae_meta;
+      if (!meta) continue;
+      const isFullText = fullTextCount > 0 && rank < fullTextCount && r.similarity >= fullTextThreshold;
+      if (isFullText) {
+        const rawText = this._extractCleanText(chat[r.messageIndex]?.mes, stripTags);
+        if (rawText) {
+          const timeTag2 = this._buildTimeTag(meta?.timestamp, currentDate);
+          lines.push(`#${r.messageIndex} ${timeTag2 ? timeTag2 + " " : ""}[\u5168\u6587\u56DE\u987E]
+${rawText}`);
+          continue;
+        }
+      }
+      const parts = [];
+      const timeTag = this._buildTimeTag(meta?.timestamp, currentDate);
+      if (timeTag) parts.push(timeTag);
+      if (meta?.scene?.location) parts.push(`\u573A\u666F:${meta.scene.location}`);
+      const chars = meta?.scene?.characters_present || [];
+      const costumes = meta?.costumes || {};
+      for (const c of chars) {
+        parts.push(costumes[c] ? `${c}(${costumes[c]})` : c);
+      }
+      if (meta?.events?.length > 0) {
+        for (const evt of meta.events) {
+          if (evt.isSummary || evt.level === "\u6458\u8981") continue;
+          const mark = evt.level === "\u5173\u952E" || evt.level === "\u95DC\u9375" ? "\u2605" : evt.level === "\u91CD\u8981" ? "\u25CF" : "\u25CB";
+          if (evt.summary) parts.push(`${mark}${evt.summary}`);
+        }
+      }
+      if (meta?.npcs) {
+        for (const [name, info] of Object.entries(meta.npcs)) {
+          let s = `NPC:${name}`;
+          if (info.relationship) s += `(${info.relationship})`;
+          parts.push(s);
+        }
+      }
+      if (meta?.items && Object.keys(meta.items).length > 0) {
+        for (const [name, info] of Object.entries(meta.items)) {
+          let s = `${info.icon || ""}${name}`;
+          if (info.holder) s += `=${info.holder}`;
+          parts.push(s);
+        }
+      }
+      if (parts.length > 0) {
+        lines.push(`#${r.messageIndex} ${parts.join(" | ")}`);
+      }
+    }
+    return lines.length > 1 ? lines.join("\n") : "";
+  }
+  _extractCleanText(mes, stripTags) {
+    if (!mes) return "";
+    let text = mes.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").replace(/<!--[\s\S]*?-->/g, "");
+    if (stripTags) {
+      const tags = stripTags.split(/[,，\s]+/).map((t) => t.trim()).filter(Boolean);
+      for (const tag of tags) {
+        const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        text = text.replace(new RegExp(`<${escaped}(?:\\s[^>]*)?>[\\s\\S]*?</${escaped}>`, "gi"), "");
+      }
+    }
+    return text.replace(/<[^>]*>/g, "").trim();
+  }
+  /**
+   * 构建时间标签：(相对时间 绝对日期 时间)
+   * 例：(前天 霜降月第一日 19:10) 或 (今天 07:55)
+   */
+  _buildTimeTag(timestamp, currentDate) {
+    if (!timestamp) return "";
+    const storyDate = timestamp.story_date;
+    const storyTime = timestamp.story_time;
+    const parts = [];
+    if (storyDate && currentDate) {
+      const relDesc = this._getRelativeTimeDesc(storyDate, currentDate);
+      if (relDesc) {
+        parts.push(relDesc.replace(/[()]/g, ""));
+      }
+    }
+    if (storyDate) parts.push(storyDate);
+    if (storyTime) parts.push(storyTime);
+    if (parts.length === 0) return "";
+    const combined = parts.join(" ");
+    return `(${combined})`;
+  }
+  _getRelativeTimeDesc(eventDate, currentDate) {
+    if (!eventDate || !currentDate) return "";
+    const result = calculateDetailedRelativeTime(eventDate, currentDate);
+    if (result.days === null || result.days === void 0) return "";
+    const { days, fromDate, toDate } = result;
+    if (days === 0) return "(\u4ECA\u5929)";
+    if (days === 1) return "(\u6628\u5929)";
+    if (days === 2) return "(\u524D\u5929)";
+    if (days === 3) return "(\u5927\u524D\u5929)";
+    if (days >= 4 && days <= 13 && fromDate) {
+      const WD = ["\u65E5", "\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D"];
+      return `(\u4E0A\u5468${WD[fromDate.getDay()]})`;
+    }
+    if (days >= 20 && days < 60 && fromDate && toDate && fromDate.getMonth() !== toDate.getMonth()) {
+      return `(\u4E0A\u4E2A\u6708${fromDate.getDate()}\u53F7)`;
+    }
+    if (days >= 300 && fromDate && toDate && fromDate.getFullYear() < toDate.getFullYear()) {
+      return `(\u53BB\u5E74${fromDate.getMonth() + 1}\u6708)`;
+    }
+    if (days > 0 && days < 30) return `(${days}\u5929\u524D)`;
+    if (days > 0) return `(${Math.round(days / 30)}\u4E2A\u6708\u524D)`;
+    return "";
+  }
+  // ========================================
+  // Worker 通信
+  // ========================================
+  _embed(texts) {
+    if (this.isApiMode) return this._embedApi(texts);
+    if (!this.worker) return Promise.resolve(null);
+    const id = ++this._callId;
+    return new Promise((resolve, reject) => {
+      this._pendingCallbacks.set(id, { resolve, reject });
+      this.worker.postMessage({ type: "embed", id, data: { texts } });
+      setTimeout(() => {
+        if (this._pendingCallbacks.has(id)) {
+          this._pendingCallbacks.delete(id);
+          reject(new Error("Embedding \u8D85\u65F6"));
+        }
+      }, 3e4);
+    });
+  }
+  async _embedApi(texts) {
+    const endpoint = `${this._apiUrl}/embeddings`;
+    try {
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this._apiKey}`
+        },
+        body: JSON.stringify({
+          model: this._apiModel,
+          input: texts
+        })
+      });
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "");
+        throw new Error(`API ${resp.status}: ${errText.slice(0, 200)}`);
+      }
+      const json = await resp.json();
+      if (!json.data || !Array.isArray(json.data)) {
+        throw new Error("API \u8FD4\u56DE\u683C\u5F0F\u5F02\u5E38\uFF1A\u7F3A\u5C11 data \u6570\u7EC4");
+      }
+      const vectors = json.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
+      return { vectors };
+    } catch (err) {
+      console.error("[Horae Vector] API embedding \u5931\u8D25:", err);
+      throw err;
+    }
+  }
+  /**
+   * Rerank API 调用（Cohere/Jina/Qwen 兼容格式）
+   * @returns {Array<{index: number, relevance_score: number}>}
+   */
+  async _rerank(query, documents, topN, settings) {
+    const baseUrl = (settings.vectorRerankUrl || settings.vectorApiUrl || "").replace(/\/+$/, "");
+    const apiKey = settings.vectorRerankKey || settings.vectorApiKey || "";
+    const model = settings.vectorRerankModel || "";
+    if (!baseUrl || !model) throw new Error("Rerank API \u5730\u5740\u6216\u6A21\u578B\u672A\u914D\u7F6E");
+    const endpoint = `${baseUrl}/rerank`;
+    console.log(`[Horae Vector] Rerank \u8BF7\u6C42: ${documents.length} \u6761\u5019\u9009 \u2192 ${endpoint}`);
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        query,
+        documents,
+        top_n: topN
+      })
+    });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      throw new Error(`Rerank API ${resp.status}: ${errText.slice(0, 200)}`);
+    }
+    const json = await resp.json();
+    const results = json.results || json.data;
+    if (!Array.isArray(results)) {
+      throw new Error("Rerank API \u8FD4\u56DE\u683C\u5F0F\u5F02\u5E38\uFF1A\u7F3A\u5C11 results \u6570\u7EC4");
+    }
+    return results.map((r) => ({
+      index: r.index,
+      relevance_score: r.relevance_score ?? r.score ?? 0
+    })).sort((a, b) => b.relevance_score - a.relevance_score);
+  }
+  // ========================================
+  // IndexedDB
+  // ========================================
+  async _openDB() {
+    if (this.db) {
+      try {
+        this.db.transaction(STORE_NAME, "readonly");
+        return;
+      } catch (_) {
+        console.warn("[Horae Vector] DB connection stale, reconnecting...");
+        try {
+          this.db.close();
+        } catch (__) {
+        }
+        this.db = null;
+      }
+    }
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION2);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          const store = db.createObjectStore(STORE_NAME, { keyPath: "key" });
+          store.createIndex("chatId", "chatId", { unique: false });
+        }
+      };
+      req.onblocked = () => {
+        console.warn("[Horae Vector] DB upgrade blocked by another tab, closing old connection");
+      };
+      req.onsuccess = () => {
+        this.db = req.result;
+        this.db.onversionchange = () => {
+          this.db.close();
+          this.db = null;
+          console.log("[Horae Vector] DB closed due to version change in another tab");
+        };
+        this.db.onclose = () => {
+          this.db = null;
+        };
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async _saveVector(messageIndex, data) {
+    await this._openDB();
+    const key = `${this.chatId}_${messageIndex}`;
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).put({
+        key,
+        chatId: this.chatId,
+        messageIndex,
+        vector: data.vector,
+        hash: data.hash,
+        document: data.document
+      });
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  async _loadAllVectors() {
+    await this._openDB();
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(STORE_NAME, "readonly");
+      const index = tx.objectStore(STORE_NAME).index("chatId");
+      const req = index.getAll(this.chatId);
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async _deleteVector(messageIndex) {
+    await this._openDB();
+    const key = `${this.chatId}_${messageIndex}`;
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).delete(key);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  async _clearVectors() {
+    await this._openDB();
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(STORE_NAME, "readwrite");
+      const store = tx.objectStore(STORE_NAME);
+      const index = store.index("chatId");
+      const req = index.openCursor(this.chatId);
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor) {
+          cursor.delete();
+          cursor.continue();
+        }
+      };
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  // ========================================
+  // 工具函数
+  // ========================================
+  _hasOriginalEvents(meta) {
+    if (!meta?.events?.length) return false;
+    return meta.events.some((e) => !e.isSummary && e.level !== "\u6458\u8981" && !e._summaryId);
+  }
+  _dotProduct(a, b) {
+    if (!a || !b || a.length !== b.length) return 0;
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) sum += a[i] * b[i];
+    return sum;
+  }
+  _hashString(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = (hash << 5) - hash + str.charCodeAt(i);
+      hash |= 0;
+    }
+    return hash.toString(36);
+  }
+  _extractKeyTerms(document) {
+    return document.split(/[\s|,，。！？：；、()\[\]（）\n]+/).filter((t) => t.length >= 2 && t.length <= 20);
+  }
+  _updateTermCounts(document, delta) {
+    const terms = this._extractKeyTerms(document);
+    const unique = new Set(terms);
+    for (const term of unique) {
+      const prev = this.termCounts.get(term) || 0;
+      const next = prev + delta;
+      if (next <= 0) this.termCounts.delete(term);
+      else this.termCounts.set(term, next);
+    }
+  }
+  _prepareText(text, isQuery) {
+    const cfg = MODEL_CONFIG[this.modelName];
+    if (cfg?.prefix) {
+      return isQuery ? `${cfg.prefix.query}${text}` : `${cfg.prefix.passage}${text}`;
+    }
+    return text;
+  }
+};
+var vectorManager = new VectorManager();
+
+// core/bme/consolidator.js
+var LOG_PREFIX3 = "[Horae BME Consolidator]";
+async function runConsolidation(graph, newNodeIds, options = {}) {
+  const { getEmbedding, callLLM, settings = {} } = options;
+  const threshold = settings.bmeConsolidationThreshold ?? 0.85;
+  const stats = { merged: 0, skipped: 0, kept: 0, evolved: 0, connections: 0, updates: 0, errors: 0 };
+  if (!newNodeIds || newNodeIds.length === 0) return stats;
+  console.log(`${LOG_PREFIX3} Starting consolidation for ${newNodeIds.length} new nodes`);
+  for (const nodeId of newNodeIds) {
+    const node = getNode(graph, nodeId);
+    if (!node || node.archived) continue;
+    try {
+      const result = await _consolidateNode(graph, node, { getEmbedding, callLLM, threshold, settings });
+      stats.merged += result.merged ? 1 : 0;
+      stats.skipped += result.skipped ? 1 : 0;
+      stats.kept += result.kept ? 1 : 0;
+      stats.evolved += result.evolved ? 1 : 0;
+      stats.connections += result.connections;
+      stats.updates += result.updates;
+    } catch (err) {
+      console.warn(`${LOG_PREFIX3} Error consolidating node ${nodeId}:`, err);
+      stats.errors++;
+    }
+  }
+  if (!graph.consolidationStats) graph.consolidationStats = { totalRuns: 0, lastRunAt: null };
+  graph.consolidationStats.totalRuns++;
+  graph.consolidationStats.lastRunAt = Date.now();
+  console.log(`${LOG_PREFIX3} Consolidation complete:`, stats);
+  return stats;
+}
+async function analyzeAutoConsolidationGate(graph, newNodeIds, options = {}) {
+  const { getEmbedding, settings = {} } = options;
+  const threshold = settings.bmeConsolidationThreshold ?? 0.85;
+  if (!getEmbedding || newNodeIds.length === 0) return false;
+  for (const nodeId of newNodeIds.slice(0, 3)) {
+    const node = getNode(graph, nodeId);
+    if (!node || node.archived) continue;
+    const text = _nodeToText(node);
+    if (!text) continue;
+    try {
+      const embedding = await getEmbedding(text);
+      if (!embedding) continue;
+      const neighbors = _findNearestNeighbors(graph, node, embedding, threshold, 1);
+      if (neighbors.length > 0) {
+        console.log(`${LOG_PREFIX3} Auto-consolidation gate: TRIGGERED (similarity ${neighbors[0].similarity.toFixed(3)})`);
+        return true;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+async function _consolidateNode(graph, node, { getEmbedding, callLLM, threshold, settings }) {
+  const result = { merged: false, skipped: false, kept: false, evolved: false, connections: 0, updates: 0 };
+  const text = _nodeToText(node);
+  if (!text) {
+    result.skipped = true;
+    return result;
+  }
+  let embedding = node.embedding;
+  if (!embedding && getEmbedding) {
+    try {
+      embedding = await getEmbedding(text);
+      if (embedding) node.embedding = embedding;
+    } catch {
+      result.skipped = true;
+      return result;
+    }
+  }
+  if (!embedding) {
+    result.kept = true;
+    return result;
+  }
+  const neighbors = _findNearestNeighbors(graph, node, embedding, threshold, 5);
+  if (neighbors.length === 0) {
+    result.kept = true;
+    return result;
+  }
+  let action = "keep";
+  if (callLLM) {
+    try {
+      action = await _classifyWithLLM(node, neighbors, callLLM, settings);
+    } catch (err) {
+      console.warn(`${LOG_PREFIX3} LLM classification failed, using heuristic:`, err);
+      action = _classifyHeuristic(node, neighbors, threshold);
+    }
+  } else {
+    action = _classifyHeuristic(node, neighbors, threshold);
+  }
+  switch (action) {
+    case "merge": {
+      const bestNeighbor = neighbors[0];
+      _mergeNodes(graph, bestNeighbor.node, node);
+      result.merged = true;
+      result.updates++;
+      break;
+    }
+    case "evolve": {
+      for (const neighbor of neighbors.slice(0, 3)) {
+        const edge = createEdge({
+          sourceId: node.id,
+          targetId: neighbor.node.id,
+          type: EDGE_TYPES.RELATED,
+          strength: neighbor.similarity,
+          label: "consolidation-link"
+        });
+        if (addEdge(graph, edge)) result.connections++;
+      }
+      result.evolved = true;
+      break;
+    }
+    case "skip":
+      node.archived = true;
+      result.skipped = true;
+      break;
+    default:
+      result.kept = true;
+  }
+  return result;
+}
+function _findNearestNeighbors(graph, queryNode, queryEmbedding, threshold, topK) {
+  const results = [];
+  for (const node of getActiveNodes(graph)) {
+    if (node.id === queryNode.id) continue;
+    if (node.type !== queryNode.type) continue;
+    if (!node.embedding) continue;
+    if (!canMergeScopedMemories(queryNode, node)) continue;
+    if (!isStoryTimeCompatible(queryNode, node)) continue;
+    const similarity = _cosineSimilarity(queryEmbedding, node.embedding);
+    if (similarity >= threshold) {
+      results.push({ node, similarity });
+    }
+  }
+  results.sort((a, b) => b.similarity - a.similarity);
+  return results.slice(0, topK);
+}
+function _cosineSimilarity(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let dotProduct = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dotProduct / denom;
+}
+async function _classifyWithLLM(newNode, neighbors, callLLM, settings) {
+  const systemPrompt = `B\u1EA1n l\xE0 h\u1EC7 th\u1ED1ng h\u1EE3p nh\u1EA5t k\xFD \u1EE9c. Ph\xE2n t\xEDch k\xFD \u1EE9c m\u1EDBi so v\u1EDBi c\xE1c k\xFD \u1EE9c hi\u1EC7n c\xF3 t\u01B0\u01A1ng t\u1EF1.
+Tr\u1EA3 v\u1EC1 JSON: {"action": "merge"|"evolve"|"keep"|"skip", "reason": "l\xFD do ng\u1EAFn g\u1ECDn"}
+
+Quy t\u1EAFc:
+- "merge": K\xFD \u1EE9c m\u1EDBi tr\xF9ng l\u1EB7p ho\xE0n to\xE0n v\u1EDBi k\xFD \u1EE9c c\u0169 \u2192 g\u1ED9p l\u1EA1i
+- "evolve": K\xFD \u1EE9c m\u1EDBi b\u1ED5 sung th\xF4ng tin m\u1EDBi cho k\xFD \u1EE9c c\u0169 \u2192 t\u1EA1o li\xEAn k\u1EBFt
+- "keep": K\xFD \u1EE9c m\u1EDBi ho\xE0n to\xE0n kh\xE1c bi\u1EC7t \u2192 gi\u1EEF nguy\xEAn
+- "skip": K\xFD \u1EE9c m\u1EDBi l\xE0 th\xF4ng tin l\u1ED7i th\u1EDDi ho\u1EB7c nhi\u1EC5u \u2192 b\u1ECF qua`;
+  const userPrompt = `## K\xFD \u1EE9c m\u1EDBi
+Lo\u1EA1i: ${newNode.type}
+N\u1ED9i dung: ${_nodeToText(newNode)}
+
+## K\xFD \u1EE9c t\u01B0\u01A1ng t\u1EF1 \u0111\xE3 c\xF3
+${neighbors.slice(0, 3).map(
+    (n, i) => `${i + 1}. [Similarity: ${n.similarity.toFixed(3)}] ${_nodeToText(n.node)}`
+  ).join("\n")}
+
+Ph\xE2n lo\u1EA1i:`;
+  try {
+    const response = await callLLM(systemPrompt, userPrompt);
+    const json = _parseJSON(response);
+    if (json?.action && ["merge", "evolve", "keep", "skip"].includes(json.action)) {
+      return json.action;
+    }
+  } catch {
+  }
+  return _classifyHeuristic(newNode, neighbors, settings.bmeConsolidationThreshold ?? 0.85);
+}
+function _classifyHeuristic(newNode, neighbors, threshold) {
+  if (neighbors.length === 0) return "keep";
+  const best = neighbors[0];
+  if (best.similarity >= 0.95) return "merge";
+  if (best.similarity >= threshold) return "evolve";
+  return "keep";
+}
+function _mergeNodes(graph, target, source) {
+  const minSeq = Math.min(target.seqRange[0], source.seqRange[0]);
+  const maxSeq = Math.max(target.seqRange[1], source.seqRange[1]);
+  target.seqRange = [minSeq, maxSeq];
+  target.importance = Math.max(target.importance, source.importance);
+  target.accessCount = (target.accessCount || 0) + (source.accessCount || 0);
+  if (source.fields) {
+    for (const [key, value] of Object.entries(source.fields)) {
+      if (!target.fields[key] || target.fields[key] === "") {
+        target.fields[key] = value;
+      }
+    }
+  }
+  if (source.clusters?.length) {
+    const existingClusters = new Set(target.clusters || []);
+    for (const tag of source.clusters) {
+      existingClusters.add(tag);
+    }
+    target.clusters = Array.from(existingClusters);
+  }
+  addEdge(graph, createEdge({
+    sourceId: target.id,
+    targetId: source.id,
+    type: EDGE_TYPES.SUPERSEDES,
+    strength: 1,
+    label: "merged"
+  }));
+  _migrateEdges(graph, source.id, target.id);
+  source.archived = true;
+  target.updatedAt = Date.now();
+  console.log(`${LOG_PREFIX3} Merged node ${source.id} \u2192 ${target.id}`);
+}
+function _migrateEdges(graph, fromNodeId, toNodeId) {
+  for (const edge of graph.edges) {
+    if (edge.invalidAt) continue;
+    if (edge.sourceId === fromNodeId) edge.sourceId = toNodeId;
+    if (edge.targetId === fromNodeId) edge.targetId = toNodeId;
+  }
+}
+function _nodeToText(node) {
+  if (!node?.fields) return "";
+  const parts = [];
+  if (node.fields.title) parts.push(node.fields.title);
+  if (node.fields.summary) parts.push(node.fields.summary);
+  if (node.fields.name) parts.push(node.fields.name);
+  if (node.fields.insight) parts.push(node.fields.insight);
+  if (node.fields.description) parts.push(node.fields.description);
+  if (node.fields.traits) parts.push(node.fields.traits);
+  if (node.fields.state) parts.push(node.fields.state);
+  return parts.join(". ").trim();
+}
+function _parseJSON(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+    if (match) {
+      try {
+        return JSON.parse(match[1]);
+      } catch {
+      }
+    }
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        return JSON.parse(jsonMatch[0]);
+      } catch {
+      }
+    }
+    return null;
+  }
+}
+
+// core/bme/compressor.js
+var LOG_PREFIX4 = "[Horae BME Compressor]";
+async function compress(graph, options = {}) {
+  const { callLLM, settings = {} } = options;
+  const stats = { compressed: 0, nodesArchived: 0, parentsCreated: 0, errors: 0 };
+  const compressibleTypes = getActiveNodes(graph).map((n) => n.type).filter((t, i, arr) => arr.indexOf(t) === i && isCompressibleType(t));
+  for (const type of compressibleTypes) {
+    try {
+      const typeResult = await _compressType(graph, type, { callLLM, settings });
+      stats.compressed += typeResult.compressed;
+      stats.nodesArchived += typeResult.nodesArchived;
+      stats.parentsCreated += typeResult.parentsCreated;
+    } catch (err) {
+      console.warn(`${LOG_PREFIX4} Error compressing type ${type}:`, err);
+      stats.errors++;
+    }
+  }
+  if (!graph.compressionStats) graph.compressionStats = { totalRuns: 0, lastRunAt: null };
+  graph.compressionStats.totalRuns++;
+  graph.compressionStats.lastRunAt = Date.now();
+  console.log(`${LOG_PREFIX4} Compression complete:`, stats);
+  return stats;
+}
+async function _compressType(graph, type, { callLLM, settings }) {
+  const schema = getSchemaForType(type);
+  if (!schema?.compression || schema.compression.mode !== COMPRESSION_MODE.HIERARCHICAL) {
+    return { compressed: 0, nodesArchived: 0, parentsCreated: 0 };
+  }
+  const { threshold, fanIn, maxDepth = 2, keepRecentLeaves = 2 } = schema.compression;
+  const leafNodes = getActiveNodesByType(graph, type).filter((n) => n.level === 0).sort((a, b) => a.seq - b.seq);
+  if (leafNodes.length < threshold) {
+    return { compressed: 0, nodesArchived: 0, parentsCreated: 0 };
+  }
+  const groups = _groupByCompatibility(leafNodes);
+  let compressed = 0, nodesArchived = 0, parentsCreated = 0;
+  for (const group of groups) {
+    if (group.length < threshold) continue;
+    const toCompress = group.slice(0, group.length - keepRecentLeaves);
+    if (toCompress.length < fanIn) continue;
+    const batches = [];
+    for (let i = 0; i < toCompress.length; i += fanIn) {
+      const batch = toCompress.slice(i, i + fanIn);
+      if (batch.length >= 2) batches.push(batch);
+    }
+    for (const batch of batches) {
+      try {
+        const parent = await _compressBatch(graph, batch, type, { callLLM, settings });
+        if (parent) {
+          parentsCreated++;
+          nodesArchived += batch.length;
+          compressed++;
+        }
+      } catch (err) {
+        console.warn(`${LOG_PREFIX4} Error compressing batch:`, err);
+      }
+    }
+  }
+  return { compressed, nodesArchived, parentsCreated };
+}
+function _groupByCompatibility(nodes) {
+  const groups = [];
+  const assigned = /* @__PURE__ */ new Set();
+  for (const node of nodes) {
+    if (assigned.has(node.id)) continue;
+    const group = [node];
+    assigned.add(node.id);
+    for (const candidate of nodes) {
+      if (assigned.has(candidate.id)) continue;
+      if (canMergeScopedMemories(node, candidate) && isStoryTimeCompatible(node, candidate)) {
+        group.push(candidate);
+        assigned.add(candidate.id);
+      }
+    }
+    groups.push(group);
+  }
+  return groups;
+}
+async function _compressBatch(graph, batch, type, { callLLM, settings }) {
+  let summary;
+  if (callLLM) {
+    try {
+      summary = await _generateCompressedSummary(batch, type, callLLM);
+    } catch (err) {
+      console.warn(`${LOG_PREFIX4} LLM compression failed, using heuristic:`, err);
+      summary = _heuristicSummary(batch);
+    }
+  } else {
+    summary = _heuristicSummary(batch);
+  }
+  if (!summary) return null;
+  const minSeq = Math.min(...batch.map((n) => n.seqRange[0]));
+  const maxSeq = Math.max(...batch.map((n) => n.seqRange[1]));
+  const maxImportance = Math.max(...batch.map((n) => n.importance));
+  const totalAccess = batch.reduce((sum, n) => sum + (n.accessCount || 0), 0);
+  const storyTimeSpan = deriveStoryTimeSpanFromNodes(batch);
+  const parentNode = createNode({
+    type,
+    fields: { summary, title: `${type} t\u1ED5ng h\u1EE3p (${batch.length} s\u1EF1 ki\u1EC7n)` },
+    seq: maxSeq,
+    seqRange: [minSeq, maxSeq],
+    importance: maxImportance,
+    scope: batch[0].scope ? normalizeMemoryScope(batch[0].scope) : null,
+    storyTime: batch[0].storyTime ? normalizeStoryTime(batch[0].storyTime) : null
+  });
+  parentNode.level = (batch[0].level || 0) + 1;
+  parentNode.accessCount = Math.ceil(totalAccess / batch.length);
+  parentNode.storyTimeSpan = storyTimeSpan;
+  parentNode.childIds = batch.map((n) => n.id);
+  addNode(graph, parentNode);
+  for (const child of batch) {
+    child.archived = true;
+    child.parentId = parentNode.id;
+    addEdge(graph, createEdge({
+      sourceId: parentNode.id,
+      targetId: child.id,
+      type: EDGE_TYPES.COMPRESSED_FROM,
+      strength: 1,
+      label: "compressed"
+    }));
+    _migrateEdgesToParent(graph, child.id, parentNode.id);
+  }
+  console.log(`${LOG_PREFIX4} Compressed ${batch.length} ${type} nodes \u2192 parent ${parentNode.id} (level ${parentNode.level})`);
+  return parentNode;
+}
+function _migrateEdgesToParent(graph, childId, parentId) {
+  for (const edge of graph.edges) {
+    if (edge.invalidAt) continue;
+    if (edge.type === EDGE_TYPES.TEMPORAL || edge.type === EDGE_TYPES.COMPRESSED_FROM) continue;
+    if (edge.sourceId === childId) edge.sourceId = parentId;
+    if (edge.targetId === childId) edge.targetId = parentId;
+  }
+}
+function sleepCycle(graph, settings = {}) {
+  const forgetThreshold = settings.bmeForgetThreshold ?? 0.5;
+  const now = Date.now();
+  const stats = { evaluated: 0, forgotten: 0, preserved: 0 };
+  const activeNodes = getActiveNodes(graph).filter((n) => n.level === 0);
+  for (const node of activeNodes) {
+    stats.evaluated++;
+    const rv = computeRetentionValue(node, now);
+    if (rv < forgetThreshold) {
+      const schema = getSchemaForType(node.type);
+      if (schema?.alwaysInject) {
+        stats.preserved++;
+        continue;
+      }
+      node.archived = true;
+      node.updatedAt = now;
+      stats.forgotten++;
+      console.log(`${LOG_PREFIX4} SleepGate archived node ${node.id} (rv=${rv.toFixed(3)}, type=${node.type})`);
+    }
+  }
+  console.log(`${LOG_PREFIX4} Sleep cycle: ${stats.forgotten} forgotten, ${stats.preserved} preserved out of ${stats.evaluated}`);
+  return stats;
+}
+function computeRetentionValue(node, now = Date.now()) {
+  const importance = (node.importance || 5) / 10;
+  const ageHours = (now - (node.lastAccessTime || node.createdTime || now)) / (1e3 * 60 * 60);
+  const recency = 1 / (1 + Math.log10(1 + Math.max(0, ageHours)));
+  const accessFreq = Math.min(node.accessCount || 0, 20) / 20;
+  return importance * recency * (1 + accessFreq);
+}
+async function _generateCompressedSummary(batch, type, callLLM) {
+  const systemPrompt = `B\u1EA1n l\xE0 h\u1EC7 th\u1ED1ng n\xE9n k\xFD \u1EE9c. T\xF3m t\u1EAFt ${batch.length} s\u1EF1 ki\u1EC7n c\xF9ng lo\u1EA1i th\xE0nh m\u1ED9t b\u1EA3n t\u1ED5ng h\u1EE3p ng\u1EAFn g\u1ECDn.
+Gi\u1EEF l\u1EA1i c\xE1c chi ti\u1EBFt quan tr\u1ECDng (nh\xE2n v\u1EADt, h\xE0nh \u0111\u1ED9ng, k\u1EBFt qu\u1EA3) nh\u01B0ng lo\u1EA1i b\u1ECF th\xF4ng tin tr\xF9ng l\u1EB7p.
+Ch\u1EC9 tr\u1EA3 v\u1EC1 n\u1ED9i dung t\xF3m t\u1EAFt, KH\xD4NG th\xEAm ti\xEAu \u0111\u1EC1 hay \u0111\u1ECBnh d\u1EA1ng markdown.`;
+  const items = batch.map((n, i) => {
+    const text = _nodeFieldsToText(n);
+    return `${i + 1}. [Importance: ${n.importance}] ${text}`;
+  }).join("\n");
+  const userPrompt = `## C\xE1c ${type} c\u1EA7n n\xE9n
+${items}
+
+T\xF3m t\u1EAFt:`;
+  const response = await callLLM(systemPrompt, userPrompt);
+  return (response || "").trim();
+}
+function _heuristicSummary(batch) {
+  const sorted = [...batch].sort((a, b) => b.importance - a.importance);
+  const top = sorted.slice(0, 3);
+  const summaries = top.map((n) => _nodeFieldsToText(n)).filter(Boolean);
+  if (summaries.length === 0) return null;
+  return `[T\u1ED5ng h\u1EE3p ${batch.length} m\u1EE5c] ${summaries.join(" | ")}`;
+}
+function _nodeFieldsToText(node) {
+  if (!node?.fields) return "";
+  const parts = [];
+  if (node.fields.title) parts.push(node.fields.title);
+  if (node.fields.summary) parts.push(node.fields.summary);
+  if (node.fields.name) parts.push(node.fields.name);
+  if (node.fields.insight) parts.push(node.fields.insight);
+  if (node.fields.description) parts.push(node.fields.description);
+  return parts.join(": ").trim();
+}
+
+// core/bme/bme-maintenance.js
+var LOG_PREFIX5 = "[Horae BME Maintenance]";
+var isMaintenanceRunning = false;
+async function triggerBmeMaintenance(chat, settings, tools) {
+  if (!settings.bmeEnabled || isMaintenanceRunning) return;
+  isMaintenanceRunning = true;
+  try {
+    const graph = await loadGraphFromChat(chat, { useIdb: true, chatId: tools.chatId });
+    let graphModified = false;
+    if (settings.bmeSleepEnabled !== false) {
+      const sleepStats = sleepCycle(graph, settings);
+      if (sleepStats.forgotten > 0) graphModified = true;
+    }
+    if (settings.bmeConsolidationEnabled !== false && tools.getEmbedding) {
+      const recentUnconsolidatedNodes = graph.nodes.filter((n) => !n.archived && n.level === 0 && !n.parentId && n.seq >= graph.lastProcessedSeq - 20).map((n) => n.id);
+      if (recentUnconsolidatedNodes.length > 0) {
+        const needsConsolidation = await analyzeAutoConsolidationGate(graph, recentUnconsolidatedNodes, {
+          getEmbedding: tools.getEmbedding,
+          settings
+        });
+        if (needsConsolidation) {
+          const stats = await runConsolidation(graph, recentUnconsolidatedNodes, {
+            getEmbedding: tools.getEmbedding,
+            callLLM: tools.callLLM,
+            settings
+          });
+          if (stats.merged > 0 || stats.evolved > 0) graphModified = true;
+        }
+      }
+    }
+    if (settings.bmeCompressionEnabled !== false) {
+      const compressStats = await compress(graph, {
+        callLLM: tools.callLLM,
+        settings
+      });
+      if (compressStats.compressed > 0) graphModified = true;
+    }
+    if (graphModified) {
+      await saveGraphToChat(chat, graph, { useIdb: true, chatId: tools.chatId });
+      if (tools.saveChat) await tools.saveChat();
+      console.log(`${LOG_PREFIX5} Maintenance complete, graph saved.`);
+    }
+  } catch (err) {
+    console.error(`${LOG_PREFIX5} Maintenance error:`, err);
+  } finally {
+    isMaintenanceRunning = false;
+  }
+}
+
+
