@@ -15787,10 +15787,18 @@ jQuery(async () => {
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onMessageReceived);
     eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, onPromptReady);
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
-    eventSource.on(event_types.MESSAGE_RENDERED, onMessageRendered);
-    eventSource.on(event_types.MESSAGE_SWIPED, onSwipePanel);
-    eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
-    eventSource.on(event_types.MESSAGE_EDITED, onMessageEdited);
+    if (event_types.MESSAGE_RENDERED) {
+        eventSource.on(event_types.MESSAGE_RENDERED, onMessageRendered);
+    }
+    if (event_types.MESSAGE_SWIPED) {
+        eventSource.on(event_types.MESSAGE_SWIPED, onSwipePanel);
+    }
+    if (event_types.MESSAGE_DELETED) {
+        eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
+    }
+    if (event_types.MESSAGE_EDITED) {
+        eventSource.on(event_types.MESSAGE_EDITED, onMessageEdited);
+    }
     
     // 并行自动摘要：用户发消息时并行触发（独立API走直接HTTP，不影响主连接）
     if (event_types.USER_MESSAGE_RENDERED) {
