@@ -16,29 +16,279 @@ import { calculateRelativeTime, calculateDetailedRelativeTime, formatRelativeTim
 import { t, initI18n, getLanguage, isZhLocale, setLanguage, detectEffectiveAiLangIsZh, detectEffectiveAiLang } from './core/i18n.js';
 
 // ============================================
+// 常量定义
+// ============================================
+const EXTENSION_NAME = 'horae';
+
+// Dynamically determine the extension folder name regardless of what the user named it
+let extFolder = 'SillyTavern-Horae';
+try {
+    const url = new URL(import.meta.url);
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length >= 2) {
+        extFolder = parts[parts.length - 2];
+    }
+} catch (e) {
+    console.warn('[Horae] Could not dynamically get extension folder, falling back to default', e);
+}
+
+const EXTENSION_FOLDER = `third-party/${extFolder}`;
+const TEMPLATE_PATH = `${EXTENSION_FOLDER}/assets/templates`;
+const VERSION = '1.11.13';
+
+// 配套正则规则（自动注入ST原生正则系统）
+const HORAE_REGEX_RULES = [
+    {
+        id: 'horae_think_sanitize',
+        scriptName: 'Horae - 思维链标签安全化',
+        description: '将思维链内的<horae>等标签转为全角括号，防止DOM解析冲突与收束误吞',
+        findRegex: '/<(\\/?horae(?:event|rpg|table[^>]*)?)>(?=[\\s\\S]*?<\\/think(?:ing)?>)/gi',
+        replaceString: '‹$1›',
+        trimStrings: [],
+        placement: [2],
+        disabled: false,
+        markdownOnly: false,
+        promptOnly: false,
+        runOnEdit: true,
+        substituteRegex: 0,
+        minDepth: null,
+        maxDepth: null,
+    },
+    {
+        id: 'horae_hide',
+        scriptName: 'Horae - 隐藏状态标签',
+        description: '隐藏<horae>状态标签，不显示在正文，不发送给AI',
+        findRegex: '/(?:<horae>(?:(?!<\\/think(?:ing)?>|<horae>)[\\s\\S])*?<\\/horae>|<!--horae[\\s\\S]*?-->)/gim',
+        replaceString: '',
+        trimStrings: [],
+        placement: [2],
+        disabled: false,
+        markdownOnly: true,
+        promptOnly: true,
+        runOnEdit: true,
+        substituteRegex: 0,
+        minDepth: null,
+        maxDepth: null,
+    },
+    {
+        id: 'horae_event_display_only',
+        scriptName: 'Horae - 隐藏事件标签',
+        description: '隐藏<horaeevent>事件标签的显示，不发送给AI',
+        findRegex: '/<horaeevent>(?:(?!<\\/think(?:ing)?>|<horaeevent>)[\\s\\S])*?<\\/horaeevent>/gim',
+        replaceString: '',
+        trimStrings: [],
+        placement: [2],
+        disabled: false,
+        markdownOnly: true,
+        promptOnly: true,
+        runOnEdit: true,
+        substituteRegex: 0,
+        minDepth: null,
+        maxDepth: null,
+    },
+    {
+        id: 'horae_table_hide',
+        scriptName: 'Horae - 隐藏表格标签',
+        description: '隐藏<horaetable>标签，不显示在正文，不发送给AI',
+        findRegex: '/<horaetable[:\\uff1a][\\s\\S]*?<\\/horaetable(?:[:\\uff1a][^>]*)?>/gim',
+        replaceString: '',
+        trimStrings: [],
+        placement: [2],
+        disabled: false,
+        markdownOnly: true,
+        promptOnly: true,
+        runOnEdit: true,
+        substituteRegex: 0,
+        minDepth: null,
+        maxDepth: null,
+    },
+    {
+        id: 'horae_rpg_hide',
+        scriptName: 'Horae - 隐藏RPG标签',
+        description: '隐藏<horaerpg>标签，不显示在正文，不发送给AI',
+        findRegex: '/<horaerpg>(?:(?!<\\/think(?:ing)?>|<horaerpg>)[\\s\\S])*?<\\/horaerpg>/gim',
+        replaceString: '',
+        trimStrings: [],
+        placement: [2],
+        disabled: false,
+        markdownOnly: true,
+        promptOnly: true,
+        runOnEdit: true,
+        substituteRegex: 0,
+        minDepth: null,
+        maxDepth: null,
+    },
+];
+
+// ============================================
+// 默认设置
+// ============================================
+const DEFAULT_SETTINGS = {
+    uiLanguage: 'auto',
+    aiOutputLanguage: 'auto',
+    enabled: true,
+    autoParse: true,
+    injectContext: true,
+    showMessagePanel: true,
+    contextDepth: 15,
+    forgetThreshold: 0.2,
+    injectionPosition: 1,
+    lastStoryDate: '',
+    lastStoryTime: '',
+    favoriteNpcs: [],  // 用户标记的星标NPC列表
+    pinnedNpcs: [],    // 用户手动标记的重要角色列表（特殊边框）
+    // 发送给AI的内容控制
+    sendTimeline: true,    // 发送剧情轨迹（关闭则无法计算相对时间）
+    sendCharacters: true,  // 发送角色信息（服装、好感度）
+    sendItems: true,       // 发送物品栏
+    customTables: [],      // 自定义表格 [{id, name, rows, cols, data, prompt}]
+    customSystemPrompt: '',      // 自定义系统注入提示词（空=使用默认）
+    customBatchPrompt: '',       // 自定义AI摘要提示词（空=使用默认）
+    customAnalysisPrompt: '',    // 自定义AI分析提示词（空=使用默认）
+    customCompressPrompt: '',    // 自定义剧情压缩提示词（空=使用默认）
+    customAutoSummaryPrompt: '', // 自定义自动摘要提示词（空=使用默认；独立于手动压缩）
+    aiScanIncludeNpc: false,     // AI摘要是否提取NPC
+    aiScanIncludeAffection: false, // AI摘要是否提取好感度
+    aiScanIncludeScene: false,    // AI摘要是否提取场景记忆
+    aiScanIncludeRelationship: false, // AI摘要是否提取关系网络
+    panelWidth: 100,               // 消息面板宽度百分比（50-100）
+    panelOffset: 0,                // 消息面板右偏移量（px）
+    themeMode: 'dark',             // 插件主题：dark / light / custom-{index}
+    customCSS: '',                 // 用户自定义CSS
+    customThemes: [],              // 导入的美化主题 [{name, author, variables, css}]
+    globalTables: [],              // 全局表格（跨角色卡共享）
+    showTopIcon: true,             // 显示顶部导航栏图标
+    customTablesPrompt: '',        // 自定义表格填写规则提示词（空=使用默认）
+    sendLocationMemory: false,     // 发送场景记忆（地点固定特征描述）
+    customLocationPrompt: '',      // 自定义场景记忆提示词（空=使用默认）
+    sendRelationships: false,      // 发送关系网络
+    sendMood: false,               // 发送情绪/心理状态追踪
+    customRelationshipPrompt: '',  // 自定义关系网络提示词（空=使用默认）
+    customMoodPrompt: '',          // 自定义情绪追踪提示词（空=使用默认）
+    // 自动摘要
+    autoSummaryEnabled: false,      // 自动摘要开关
+    autoSummaryKeepRecent: 10,      // 保留最近N条消息不压缩
+    autoSummaryBufferMode: 'messages', // 'messages' | 'tokens'
+    autoSummaryBufferLimit: 20,     // 缓冲阈值（楼层数或Token数）
+    autoSummaryBatchMaxMsgs: 50,    // 单次摘要最大消息条数
+    autoSummaryBatchMaxTokens: 80000, // 单次摘要最大Token数
+    autoSummaryUseCustomApi: false, // 是否使用独立API端点
+    autoSummaryApiUrl: '',          // 独立API端点地址（OpenAI兼容）
+    autoSummaryApiKey: '',          // 独立API密钥
+    autoSummaryModel: '',           // 独立API模型名称
+    antiParaphraseMode: false,      // 反转述模式：AI回复时结算上一条USER的内容
+    sideplayMode: false,            // 番外/小剧场模式：启用后可标记消息跳过Horae
+    // RPG 模式
+    rpgMode: false,                 // RPG 模式总开关
+    sendRpgBars: true,              // 发送属性条（HP/MP/SP/状态）
+    rpgBarsUserOnly: false,         // 属性条仅限主角
+    sendRpgSkills: true,            // 发送技能列表
+    rpgSkillsUserOnly: false,       // 技能仅限主角
+    sendRpgAttributes: true,        // 发送多维属性面板
+    rpgAttrsUserOnly: false,        // 属性面板仅限主角
+    sendRpgReputation: true,        // 发送声望数据
+    rpgReputationUserOnly: false,   // 声望仅限主角
+    sendRpgEquipment: false,        // 发送装备栏（可选）
+    rpgEquipmentUserOnly: false,    // 装备仅限主角
+    sendRpgLevel: false,            // 发送等级/经验值
+    rpgLevelUserOnly: false,        // 等级仅限主角
+    sendRpgCurrency: false,         // 发送货币系统
+    rpgCurrencyUserOnly: false,     // 货币仅限主角
+    rpgUserOnly: false,             // RPG全局仅限主角（总开关，联动所有子模块）
+    sendRpgStronghold: false,       // 发送据点/基地系统
+    rpgBarConfig: [
+        { key: 'hp', name: 'HP', color: '#22c55e' },
+        { key: 'mp', name: 'MP', color: '#6366f1' },
+        { key: 'sp', name: 'SP', color: '#f59e0b' },
+    ],
+    rpgAttributeConfig: [
+        { key: 'str', name: '力量', desc: '物理攻击、负重与近战伤害' },
+        { key: 'dex', name: '敏捷', desc: '反射、闪避与远程精准' },
+        { key: 'con', name: '体质', desc: '生命力、耐久与抗毒' },
+        { key: 'int', name: '智力', desc: '学识、魔法与推理能力' },
+        { key: 'wis', name: '感知', desc: '洞察、直觉与意志力' },
+        { key: 'cha', name: '魅力', desc: '说服、领导与人格魅力' },
+    ],
+    rpgAttrViewMode: 'radar',       // 'radar' 或 'text'
+    customRpgPrompt: '',            // 自定义RPG提示词（空=默认）
+    promptPresets: [],              // 提示词预设存档 [{name, prompts:{system,batch,...}}]
+    equipmentTemplates: [           // 装备格位模板
+        { name: '人类', slots: [
+            { name: '头部', maxCount: 1 }, { name: '躯干', maxCount: 1 }, { name: '手部', maxCount: 1 },
+            { name: '腰带', maxCount: 1 }, { name: '下身', maxCount: 1 }, { name: '足部', maxCount: 1 },
+            { name: '项链', maxCount: 1 }, { name: '护身符', maxCount: 1 }, { name: '戒指', maxCount: 2 },
+        ]},
+        { name: '兽人', slots: [
+            { name: '头部', maxCount: 1 }, { name: '躯干', maxCount: 1 }, { name: '手部', maxCount: 1 },
+            { name: '腰带', maxCount: 1 }, { name: '下身', maxCount: 1 }, { name: '足部', maxCount: 1 },
+            { name: '尾部', maxCount: 1 }, { name: '项链', maxCount: 1 }, { name: '戒指', maxCount: 2 },
+        ]},
+        { name: '翼族', slots: [
+            { name: '头部', maxCount: 1 }, { name: '躯干', maxCount: 1 }, { name: '手部', maxCount: 1 },
+            { name: '腰带', maxCount: 1 }, { name: '下身', maxCount: 1 }, { name: '足部', maxCount: 1 },
+            { name: '翅膀', maxCount: 1 }, { name: '项链', maxCount: 1 }, { name: '戒指', maxCount: 2 },
+        ]},
+        { name: '人马', slots: [
+            { name: '头部', maxCount: 1 }, { name: '躯干', maxCount: 1 }, { name: '手部', maxCount: 1 },
+            { name: '腰带', maxCount: 1 }, { name: '马甲', maxCount: 1 }, { name: '马蹄铁', maxCount: 4 },
+            { name: '项链', maxCount: 1 }, { name: '戒指', maxCount: 2 },
+        ]},
+        { name: '拉弥亚', slots: [
+            { name: '头部', maxCount: 1 }, { name: '躯干', maxCount: 1 }, { name: '手部', maxCount: 1 },
+            { name: '腰带', maxCount: 1 }, { name: '蛇尾饰', maxCount: 1 },
+            { name: '项链', maxCount: 1 }, { name: '护身符', maxCount: 1 }, { name: '戒指', maxCount: 2 },
+        ]},
+        { name: '恶魔', slots: [
+            { name: '头部', maxCount: 1 }, { name: '角饰', maxCount: 1 }, { name: '躯干', maxCount: 1 },
+            { name: '手部', maxCount: 1 }, { name: '腰带', maxCount: 1 }, { name: '下身', maxCount: 1 },
+            { name: '足部', maxCount: 1 }, { name: '翅膀', maxCount: 1 }, { name: '尾部', maxCount: 1 },
+            { name: '项链', maxCount: 1 }, { name: '戒指', maxCount: 2 },
+        ]},
+    ],
+    rpgDiceEnabled: false,          // RPG骰子面板
+    dicePosX: null,                 // 骰子面板拖拽位置X（null=默认右下角）
+    dicePosY: null,                 // 骰子面板拖拽位置Y
+    // 教学
+    tutorialCompleted: false,       // 新用户导航教学是否已完成
+    // 向量记忆
+    vectorEnabled: false,
+    vectorSource: 'local',             // 'local' = 本地模型, 'api' = 远程 API
+    vectorModel: 'Xenova/bge-small-zh-v1.5',
+    vectorDtype: 'q8',
+    vectorApiUrl: '',                  // OpenAI 兼容 embedding API 地址
+    vectorApiKey: '',                  // API 密钥
+    vectorApiModel: '',                // 远程 embedding 模型名称
+    vectorPureMode: false,             // 纯向量模式（强模型优化，关闭关键词启发式）
+    vectorRerankEnabled: false,        // 启用 Rerank 二次排序
+    vectorRerankFullText: false,       // Rerank 使用全文而非摘要（需要长上下文模型如 Qwen3-Reranker）
+    vectorRerankModel: '',             // Rerank 模型名称
+    vectorRerankUrl: '',               // Rerank API 地址（留空则复用 embedding 地址）
+    vectorRerankKey: '',               // Rerank API 密钥（留空则复用 embedding 密钥）
+    vectorDiffusionEnabled: true,      // 启用记忆图谱扩散 (Graph Diffusion)
+    vectorTopK: 5,
+    vectorThreshold: 0.72,
+    vectorFullTextCount: 3,
+    vectorFullTextThreshold: 0.9,
+    vectorStripTags: '',
+};
+
+// ============================================
 // 全局变量
 // ============================================
-
-import { EXTENSION_NAME, EXTENSION_FOLDER, TEMPLATE_PATH, VERSION, HORAE_REGEX_RULES, DEFAULT_SETTINGS } from './core/constants.js';
-
-import { enterNpcMultiSelect, exitNpcMultiSelect, toggleNpcSelection, _updateNpcSelectedCount, deleteSelectedNpcs, getStatusIcon, getRpgBarColor, getRpgBarName } from './ui/timeline.js';
-import { rollDice, injectDiceToChat, renderDicePanel, _applyDicePos, renderBarConfig, buildCharacterOptions, drawRadarChart, _syncRpgTabVisibility, updateRpgDisplay, renderAttrConfig } from './ui/rpg_dice.js';
-import { _ensureRpgConfigs, _syncConfigsToRpg, _getRepConfig, _getRepValues, _saveRepData, renderReputationConfig, renderReputationValues, _openRepSubItemsDialog, _bindReputationConfigEvents } from './ui/rpg_rep.js';
-import { _getEqConfigMap, _getCharEqConfig, _getEqValues, _saveEqData, renderEquipmentSlotConfig, renderEquipmentValues, _openAddEquipDialog, _bindEquipmentEvents, _openEquipTemplateManageModal, _getCurConfig, _saveCurData, renderCurrencyConfig, _renderCurrencyHint, _bindCurrencyEvents, _getStrongholdData, _saveStrongholdData, _genShId, _buildShTree, renderStrongholdTree, _renderShNodes, _openShEditDialog, _bindStrongholdEvents, renderLevelValues, _buildCharHudHtml, _matchPresentChars, renderRpgHud, updateAllRpgHuds, _buildRpgSnapshotMap, _renderRpgHudFromSnapshot, refreshAllDisplays, _saveGlobalMeta, _restoreGlobalMeta, _saveCompressedFlags, _restoreCompressedFlags, cleanOrphanSummaries, enforceHiddenState, repairAllSummaryStates, refreshVisiblePanels, updateLocationMemoryDisplay, openLocationEditModal, openLocationMergeModal, updateTokenCounter, scrollToMessage, applyTopIconVisibility, applyPanelWidth, resolveTheme, isLightMode, applyThemeMode, applyCustomCSS, exportTheme, importTheme, refreshThemeSelector, deleteCustomTheme } from './ui/rpg_equip.js';
-import { _getTableId, _deepCopyOneTable, pushTableSnapshot, undoSingleTable, redoSingleTable, _updatePerTableUndoRedoButtons, clearTableHistory, renderCustomTablesList, bindExcelTableEvents, showTableContextMenu, hideContextMenu, executeTableAction, addNewExcelTable, deleteCustomTable, purgeTableContributions, clearTableData, toggleTableScope, bindItemsEvents } from './ui/tables.js';
-import { _tdHslToHex, _tdHexToHsl, _tdHexToRgb, _tdParseColorHsl, _tdGenerateVars, _tdBuildImageCSS, openThemeDesigner, addMessagePanel, buildDeletedItemsDisplay, buildAgendaEditorRows, buildPanelRelationships, buildPanelMoodEditable, buildPanelContent, bindPanelEvents, bindDeleteButtons, bindAffectionInputs, toggleSideplay, rescanMessageMeta, savePanelData, buildHoraeTagFromMeta, buildHoraeEventTagFromMeta, injectHoraeTagToMessage } from './ui/themeDesigner.js';
-import { _getTutorialSteps, startTutorial, showTutorialStep } from './ui/tutorial.js';
-
-import { settings, appState, setSettings, loadSettings, saveSettings, showToast, getTemplate } from './core/state.js';
-
-  // 物品多选模式
-     // 选中的物品名称
-         // 长按计时器
- // 待办多选模式
- // 选中的待办索引
-   // 待办长按计时器
-     // NPC多选模式
-       // 选中的NPC名称
+let settings = { ...DEFAULT_SETTINGS };
+let doNavbarIconClick = null;
+let isInitialized = false;
+let _isSummaryGeneration = false;
+let _summaryInProgress = false;
+let _chatFullyLoaded = false;
+let itemsMultiSelectMode = false;  // 物品多选模式
+let selectedItems = new Set();     // 选中的物品名称
+let longPressTimer = null;         // 长按计时器
+let agendaMultiSelectMode = false; // 待办多选模式
+let selectedAgendaIndices = new Set(); // 选中的待办索引
+let agendaLongPressTimer = null;   // 待办长按计时器
+let npcMultiSelectMode = false;     // NPC多选模式
+let selectedNpcs = new Set();       // 选中的NPC名称
 let timelineMultiSelectMode = false; // 时间线多选模式
 let selectedTimelineEvents = new Set(); // 选中的事件（"msgIndex-eventIndex"格式）
 let timelineLongPressTimer = null;  // 时间线长按计时器
@@ -73,6 +323,10 @@ function ensureRegexRules() {
     }
 }
 
+/** 获取HTML模板 */
+async function getTemplate(name) {
+    return await renderExtensionTemplateAsync(TEMPLATE_PATH, name);
+}
 
 function _getDefaultRpgAttrConfig() {
     const lang = detectEffectiveAiLang(settings);
@@ -217,7 +471,7 @@ function applyI18nToDOM(root) {
  * 检查是否为新版导航栏
  */
 function isNewNavbarVersion() {
-    return typeof appState.doNavbarIconClick === 'function';
+    return typeof doNavbarIconClick === 'function';
 }
 
 /**
@@ -226,11 +480,11 @@ function isNewNavbarVersion() {
 async function initNavbarFunction() {
     try {
         const scriptModule = await import('/script.js');
-        if (scriptModule.appState.doNavbarIconClick) {
-            appState.doNavbarIconClick = scriptModule.appState.doNavbarIconClick;
+        if (scriptModule.doNavbarIconClick) {
+            doNavbarIconClick = scriptModule.doNavbarIconClick;
         }
     } catch (error) {
-        console.warn(`[Horae] appState.doNavbarIconClick 不可用，使用旧版抽屉模式`);
+        console.warn(`[Horae] doNavbarIconClick 不可用，使用旧版抽屉模式`);
     }
 }
 
@@ -238,6 +492,15 @@ async function initNavbarFunction() {
  * 加载设置
  */
 let _isFirstTimeUser = false;
+function loadSettings() {
+    if (extension_settings[EXTENSION_NAME]) {
+        settings = { ...DEFAULT_SETTINGS, ...extension_settings[EXTENSION_NAME] };
+    } else {
+        _isFirstTimeUser = true;
+        extension_settings[EXTENSION_NAME] = { ...DEFAULT_SETTINGS };
+        settings = { ...DEFAULT_SETTINGS };
+    }
+}
 
 /** 迁移旧版属性配置到 DND 六维 */
 function _migrateAttrConfig() {
@@ -252,7 +515,24 @@ function _migrateAttrConfig() {
     }
 }
 
+/**
+ * 保存设置
+ */
+function saveSettings() {
+    extension_settings[EXTENSION_NAME] = settings;
+    saveSettingsDebounced();
+}
 
+/**
+ * 显示 Toast 消息
+ */
+function showToast(message, type = 'info') {
+    if (window.toastr) {
+        toastr[type](message, 'Horae');
+    } else {
+        console.log(`[Horae] ${type}: ${message}`);
+    }
+}
 
 /** 获取当前对话的自定义表格 */
 function getChatTables() {
@@ -1215,7 +1495,7 @@ function updateAgendaDisplay() {
     if (agenda.length === 0) {
         listEl.innerHTML = `<div class="horae-empty-hint">${t('timeline.noAgenda')}</div>`;
         // 退出多选模式（如果所有待办被删完了）
-        if (appState.agendaMultiSelectMode) exitAgendaMultiSelect();
+        if (agendaMultiSelectMode) exitAgendaMultiSelect();
         return;
     }
     
@@ -1226,10 +1506,10 @@ function updateAgendaDisplay() {
         const dateDisplay = item.date ? `<span class="horae-agenda-date"><i class="fa-regular fa-calendar"></i> ${escapeHtml(item.date)}</span>` : '';
         
         // 多选模式：显示 checkbox
-        const checkboxHtml = appState.agendaMultiSelectMode
-            ? `<label class="horae-agenda-select-check"><input type="checkbox" ${appState.selectedAgendaIndices.has(index) ? 'checked' : ''} data-agenda-select="${index}"></label>`
+        const checkboxHtml = agendaMultiSelectMode
+            ? `<label class="horae-agenda-select-check"><input type="checkbox" ${selectedAgendaIndices.has(index) ? 'checked' : ''} data-agenda-select="${index}"></label>`
             : '';
-        const selectedClass = appState.agendaMultiSelectMode && appState.selectedAgendaIndices.has(index) ? ' selected' : '';
+        const selectedClass = agendaMultiSelectMode && selectedAgendaIndices.has(index) ? ' selected' : '';
         
         return `
             <div class="horae-agenda-item${selectedClass}" data-agenda-idx="${index}">
@@ -1247,7 +1527,7 @@ function updateAgendaDisplay() {
     listEl.querySelectorAll('.horae-agenda-item').forEach(el => {
         const idx = parseInt(el.dataset.agendaIdx);
         
-        if (appState.agendaMultiSelectMode) {
+        if (agendaMultiSelectMode) {
             // 多选模式：点击切换选中
             el.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -1276,24 +1556,24 @@ function updateAgendaDisplay() {
 // ---- 待办多选模式 ----
 
 function startAgendaLongPress(e, agendaIdx) {
-    if (appState.agendaMultiSelectMode) return;
-    appState.agendaLongPressTimer = setTimeout(() => {
+    if (agendaMultiSelectMode) return;
+    agendaLongPressTimer = setTimeout(() => {
         enterAgendaMultiSelect(agendaIdx);
     }, 800);
 }
 
 function cancelAgendaLongPress() {
-    if (appState.agendaLongPressTimer) {
-        clearTimeout(appState.agendaLongPressTimer);
-        appState.agendaLongPressTimer = null;
+    if (agendaLongPressTimer) {
+        clearTimeout(agendaLongPressTimer);
+        agendaLongPressTimer = null;
     }
 }
 
 function enterAgendaMultiSelect(initialIdx) {
-    appState.agendaMultiSelectMode = true;
-    appState.selectedAgendaIndices.clear();
+    agendaMultiSelectMode = true;
+    selectedAgendaIndices.clear();
     if (initialIdx !== undefined && initialIdx !== null) {
-        appState.selectedAgendaIndices.add(initialIdx);
+        selectedAgendaIndices.add(initialIdx);
     }
     
     const bar = document.getElementById('horae-agenda-multiselect-bar');
@@ -1309,8 +1589,8 @@ function enterAgendaMultiSelect(initialIdx) {
 }
 
 function exitAgendaMultiSelect() {
-    appState.agendaMultiSelectMode = false;
-    appState.selectedAgendaIndices.clear();
+    agendaMultiSelectMode = false;
+    selectedAgendaIndices.clear();
     
     const bar = document.getElementById('horae-agenda-multiselect-bar');
     if (bar) bar.style.display = 'none';
@@ -1323,18 +1603,18 @@ function exitAgendaMultiSelect() {
 }
 
 function toggleAgendaSelection(idx) {
-    if (appState.selectedAgendaIndices.has(idx)) {
-        appState.selectedAgendaIndices.delete(idx);
+    if (selectedAgendaIndices.has(idx)) {
+        selectedAgendaIndices.delete(idx);
     } else {
-        appState.selectedAgendaIndices.add(idx);
+        selectedAgendaIndices.add(idx);
     }
     
     // 更新该条目的UI
     const item = document.querySelector(`#horae-agenda-list .horae-agenda-item[data-agenda-idx="${idx}"]`);
     if (item) {
         const cb = item.querySelector('input[type="checkbox"]');
-        if (cb) cb.checked = appState.selectedAgendaIndices.has(idx);
-        item.classList.toggle('selected', appState.selectedAgendaIndices.has(idx));
+        if (cb) cb.checked = selectedAgendaIndices.has(idx);
+        item.classList.toggle('selected', selectedAgendaIndices.has(idx));
     }
     
     updateAgendaSelectedCount();
@@ -1344,7 +1624,7 @@ function selectAllAgenda() {
     const items = document.querySelectorAll('#horae-agenda-list .horae-agenda-item');
     items.forEach(item => {
         const idx = parseInt(item.dataset.agendaIdx);
-        if (!isNaN(idx)) appState.selectedAgendaIndices.add(idx);
+        if (!isNaN(idx)) selectedAgendaIndices.add(idx);
     });
     updateAgendaDisplay();
     updateAgendaSelectedCount();
@@ -1352,21 +1632,21 @@ function selectAllAgenda() {
 
 function updateAgendaSelectedCount() {
     const countEl = document.getElementById('horae-agenda-selected-count');
-    if (countEl) countEl.textContent = appState.selectedAgendaIndices.size;
+    if (countEl) countEl.textContent = selectedAgendaIndices.size;
 }
 
 async function deleteSelectedAgenda() {
-    if (appState.selectedAgendaIndices.size === 0) {
+    if (selectedAgendaIndices.size === 0) {
         showToast(t('toast.insufficientEvents'), 'warning');
         return;
     }
     
-    const confirmed = confirm(t('confirm.deleteAgenda', {n: appState.selectedAgendaIndices.size}));
+    const confirmed = confirm(t('confirm.deleteAgenda', {n: selectedAgendaIndices.size}));
     if (!confirmed) return;
     
     // 获取当前完整的 agenda 列表，按索引倒序删除
     const agenda = getAllAgenda();
-    const sortedIndices = Array.from(appState.selectedAgendaIndices).sort((a, b) => b - a);
+    const sortedIndices = Array.from(selectedAgendaIndices).sort((a, b) => b - a);
     
     for (const idx of sortedIndices) {
         const item = agenda[idx];
@@ -1929,13 +2209,13 @@ async function compressSelectedTimelineEvents() {
             .replace(/\{\{count\}\}/gi, String(events.length))
             .replace(/\{\{user\}\}/gi, userName);
 
-        appState._isSummaryGeneration = true;
+        _isSummaryGeneration = true;
         let response;
         try {
             const genPromise = getContext().generateRaw(prompt, null, false, false);
             response = await Promise.race([genPromise, cancelPromise]);
         } finally {
-            appState._isSummaryGeneration = false;
+            _isSummaryGeneration = false;
             window.fetch = _origFetch;
         }
         
@@ -2410,9 +2690,9 @@ function updateCharactersDisplay() {
                     }
                 }
                 
-                const isSelected = appState.selectedNpcs.has(name);
+                const isSelected = selectedNpcs.has(name);
                 const selectedClass = isSelected ? 'selected' : '';
-                const checkboxDisplay = appState.npcMultiSelectMode ? 'flex' : 'none';
+                const checkboxDisplay = npcMultiSelectMode ? 'flex' : 'none';
                 return `
                     <div class="horae-npc-item horae-editable-item ${starClass} ${mainClass} ${selectedClass}" data-npc-name="${name}" data-npc-gender="${info.gender || ''}">
                         <div class="horae-npc-header">
@@ -2490,7 +2770,7 @@ function updateCharactersDisplay() {
             // NPC 多选点击
             npcEl.querySelectorAll('.horae-npc-item').forEach(item => {
                 item.addEventListener('click', (e) => {
-                    if (!appState.npcMultiSelectMode) return;
+                    if (!npcMultiSelectMode) return;
                     if (e.target.closest('.horae-item-edit-btn') || e.target.closest('.horae-npc-star')) return;
                     const name = item.dataset.npcName;
                     if (name) toggleNpcSelection(name);
@@ -2792,9 +3072,9 @@ function updateItemsDisplay() {
             positionStr = t('ui.locationUnknown');
         }
         
-        const isSelected = appState.selectedItems.has(name);
+        const isSelected = selectedItems.has(name);
         const selectedClass = isSelected ? 'selected' : '';
-        const checkboxDisplay = appState.itemsMultiSelectMode ? 'flex' : 'none';
+        const checkboxDisplay = itemsMultiSelectMode ? 'flex' : 'none';
         const description = info.description || '';
         const descHtml = description ? `<div class="horae-full-item-desc">${description}</div>` : '';
         const isLocked = !!info._locked;
@@ -3605,6 +3885,6394 @@ function preventModalBubble(modalEl) {
 }
 
 // ============================================
+// Excel风格自定义表格功能
+// ============================================
+
+// 每个表格独立的 Undo/Redo 栈，key = tableId
+const TABLE_HISTORY_MAX = 20;
+const _perTableUndo = {};  // { tableId: [snapshot, ...] }
+const _perTableRedo = {};  // { tableId: [snapshot, ...] }
+
+function _getTableId(scope, tableIndex) {
+    const tables = getTablesByScope(scope);
+    return tables[tableIndex]?.id || `${scope}_${tableIndex}`;
+}
+
+function _deepCopyOneTable(scope, tableIndex) {
+    const tables = getTablesByScope(scope);
+    if (!tables[tableIndex]) return null;
+    return JSON.parse(JSON.stringify(tables[tableIndex]));
+}
+
+/** 在修改前调用：保存指定表格的快照到其独立 undo 栈 */
+function pushTableSnapshot(scope, tableIndex) {
+    if (tableIndex == null) return;
+    const tid = _getTableId(scope, tableIndex);
+    const snap = _deepCopyOneTable(scope, tableIndex);
+    if (!snap) return;
+    if (!_perTableUndo[tid]) _perTableUndo[tid] = [];
+    _perTableUndo[tid].push({ scope, tableIndex, table: snap });
+    if (_perTableUndo[tid].length > TABLE_HISTORY_MAX) _perTableUndo[tid].shift();
+    _perTableRedo[tid] = [];
+    _updatePerTableUndoRedoButtons(tid);
+}
+
+/** 撤回指定表格 */
+function undoSingleTable(tid) {
+    const stack = _perTableUndo[tid];
+    if (!stack?.length) return;
+    const snap = stack.pop();
+    const tables = getTablesByScope(snap.scope);
+    if (!tables[snap.tableIndex]) return;
+    // 当前状态入 redo
+    if (!_perTableRedo[tid]) _perTableRedo[tid] = [];
+    _perTableRedo[tid].push({
+        scope: snap.scope,
+        tableIndex: snap.tableIndex,
+        table: JSON.parse(JSON.stringify(tables[snap.tableIndex]))
+    });
+    tables[snap.tableIndex] = snap.table;
+    setTablesByScope(snap.scope, tables);
+    renderCustomTablesList();
+    showToast(t('toast.tableUndone'), 'info');
+}
+
+/** 复原指定表格 */
+function redoSingleTable(tid) {
+    const stack = _perTableRedo[tid];
+    if (!stack?.length) return;
+    const snap = stack.pop();
+    const tables = getTablesByScope(snap.scope);
+    if (!tables[snap.tableIndex]) return;
+    if (!_perTableUndo[tid]) _perTableUndo[tid] = [];
+    _perTableUndo[tid].push({
+        scope: snap.scope,
+        tableIndex: snap.tableIndex,
+        table: JSON.parse(JSON.stringify(tables[snap.tableIndex]))
+    });
+    tables[snap.tableIndex] = snap.table;
+    setTablesByScope(snap.scope, tables);
+    renderCustomTablesList();
+    showToast(t('toast.tableRedone'), 'info');
+}
+
+function _updatePerTableUndoRedoButtons(tid) {
+    const undoBtn = document.querySelector(`.horae-table-undo-btn[data-table-id="${tid}"]`);
+    const redoBtn = document.querySelector(`.horae-table-redo-btn[data-table-id="${tid}"]`);
+    if (undoBtn) undoBtn.disabled = !_perTableUndo[tid]?.length;
+    if (redoBtn) redoBtn.disabled = !_perTableRedo[tid]?.length;
+}
+
+/** 切换聊天时清空所有 undo/redo 栈 */
+function clearTableHistory() {
+    for (const k of Object.keys(_perTableUndo)) delete _perTableUndo[k];
+    for (const k of Object.keys(_perTableRedo)) delete _perTableRedo[k];
+}
+
+let activeContextMenu = null;
+
+/**
+ * 渲染自定义表格列表
+ */
+function renderCustomTablesList() {
+    const listEl = document.getElementById('horae-custom-tables-list');
+    if (!listEl) return;
+
+    const globalTables = getGlobalTables();
+    const charTables = getCharacterTables();
+    const chatTables = getChatTables();
+
+    if (globalTables.length === 0 && charTables.length === 0 && chatTables.length === 0) {
+        listEl.innerHTML = `
+            <div class="horae-custom-tables-empty">
+                <i class="fa-solid fa-table-cells"></i>
+                <div>${t('settings.customTables')}</div>
+                <div style="font-size:11px;opacity:0.7;margin-top:4px;">${t('common.add')}</div>
+            </div>
+        `;
+        return;
+    }
+
+    /** 渲染单个表格 */
+    function renderOneTable(table, idx, scope) {
+        const rows = table.rows || 2;
+        const cols = table.cols || 2;
+        const data = table.data || {};
+        const lockedRows = new Set(table.lockedRows || []);
+        const lockedCols = new Set(table.lockedCols || []);
+        const lockedCells = new Set(table.lockedCells || []);
+        const scopeConfig = {
+            global:    { icon: 'fa-globe',     label: t('ui.scopeGlobal'),     title: t('ui.scopeGlobalDesc'),     color: 'var(--horae-accent)' },
+            character: { icon: 'fa-id-card',   label: t('ui.scopeCharacter'),  title: t('ui.scopeCharacterDesc'),  color: 'var(--horae-warning)' },
+            local:     { icon: 'fa-bookmark',  label: t('ui.scopeLocal'),      title: t('ui.scopeLocalDesc'),      color: 'var(--horae-primary-light)' },
+        };
+        const sc = scopeConfig[scope] || scopeConfig.local;
+        const isGlobal = scope === 'global';
+        const scopeIcon = sc.icon;
+        const scopeLabel = sc.label;
+        const scopeTitle = sc.title;
+
+        let tableHtml = '<table class="horae-excel-table">';
+        for (let r = 0; r < rows; r++) {
+            const rowLocked = lockedRows.has(r);
+            tableHtml += '<tr>';
+            for (let c = 0; c < cols; c++) {
+                const cellKey = `${r}-${c}`;
+                const cellValue = data[cellKey] || '';
+                const isHeader = r === 0 || c === 0;
+                const tag = isHeader ? 'th' : 'td';
+                const cellLocked = rowLocked || lockedCols.has(c) || lockedCells.has(cellKey);
+                const charLen = [...cellValue].reduce((sum, ch) => sum + (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? 2 : 1), 0);
+                const inputSize = Math.max(4, Math.min(charLen + 2, 40));
+                const lockedClass = cellLocked ? ' horae-cell-locked' : '';
+                tableHtml += `<${tag} data-row="${r}" data-col="${c}" class="${lockedClass}">`;
+                tableHtml += `<input type="text" value="${escapeHtml(cellValue)}" size="${inputSize}" data-scope="${scope}" data-table="${idx}" data-row="${r}" data-col="${c}" placeholder="${isHeader ? t('ui.tableHeader') : ''}">`;
+                tableHtml += `</${tag}>`;
+            }
+            tableHtml += '</tr>';
+        }
+        tableHtml += '</table>';
+
+        const tid = table.id || `${scope}_${idx}`;
+        const hasUndo = !!(_perTableUndo[tid]?.length);
+        const hasRedo = !!(_perTableRedo[tid]?.length);
+
+        return `
+            <div class="horae-excel-table-container" data-table-index="${idx}" data-scope="${scope}" data-table-id="${tid}">
+                <div class="horae-excel-table-header">
+                    <div class="horae-excel-table-title">
+                        <i class="fa-solid ${scopeIcon}" title="${scopeTitle}" style="color:${sc.color}; cursor:pointer;" data-toggle-scope="${idx}" data-scope="${scope}"></i>
+                        <span class="horae-table-scope-label" data-toggle-scope="${idx}" data-scope="${scope}" title="${t('ui.clickToToggleScope')}">${scopeLabel}</span>
+                        <input type="text" value="${escapeHtml(table.name || '')}" placeholder="${t('ui.tableName')}" data-table-name="${idx}" data-scope="${scope}">
+                    </div>
+                    <div class="horae-excel-table-actions">
+                        <button class="horae-table-undo-btn" title="${t('ui.undoBtn')}" data-table-id="${tid}" ${hasUndo ? '' : 'disabled'}>
+                            <i class="fa-solid fa-rotate-left"></i>
+                        </button>
+                        <button class="horae-table-redo-btn" title="${t('ui.redoBtn')}" data-table-id="${tid}" ${hasRedo ? '' : 'disabled'}>
+                            <i class="fa-solid fa-rotate-right"></i>
+                        </button>
+                        <button class="clear-table-data-btn" title="${t('ui.clearDataBtn')}" data-table-index="${idx}" data-scope="${scope}">
+                            <i class="fa-solid fa-eraser"></i>
+                        </button>
+                        <button class="export-table-btn" title="${t('ui.exportTableBtn')}" data-table-index="${idx}" data-scope="${scope}">
+                            <i class="fa-solid fa-download"></i>
+                        </button>
+                        <button class="delete-table-btn danger" title="${t('ui.deleteTableBtn')}" data-table-index="${idx}" data-scope="${scope}">
+                            <i class="fa-solid fa-trash-can"></i>
+                        </button>
+                    </div>
+                </div><!-- header -->
+                <div class="horae-excel-table-wrapper">
+                    ${tableHtml}
+                </div>
+                <div class="horae-table-prompt-row">
+                    <input type="text" value="${escapeHtml(table.prompt || '')}" placeholder="${t('ui.tablePromptPlaceholder')}" data-table-prompt="${idx}" data-scope="${scope}">
+                </div>
+            </div>
+        `;
+    }
+
+    let html = '';
+    if (globalTables.length > 0) {
+        html += `<div class="horae-tables-group-label"><i class="fa-solid fa-globe"></i> ${t('ui.globalTables')}</div>`;
+        html += globalTables.map((tbl, i) => renderOneTable(tbl, i, 'global')).join('');
+    }
+    if (charTables.length > 0) {
+        const charName = getContext()?.name2 || '';
+        html += `<div class="horae-tables-group-label"><i class="fa-solid fa-id-card"></i> ${t('ui.characterTables')}${charName ? ` (${charName})` : ''}</div>`;
+        html += charTables.map((tbl, i) => renderOneTable(tbl, i, 'character')).join('');
+    }
+    if (chatTables.length > 0) {
+        html += `<div class="horae-tables-group-label"><i class="fa-solid fa-bookmark"></i> ${t('ui.localTables')}</div>`;
+        html += chatTables.map((tbl, i) => renderOneTable(tbl, i, 'local')).join('');
+    }
+    listEl.innerHTML = html;
+
+    bindExcelTableEvents();
+}
+
+/**
+ * HTML转义
+ */
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#39;');
+}
+
+/**
+ * 绑定Excel表格事件
+ */
+function bindExcelTableEvents() {
+    /** 从元素属性获取scope */
+    const getScope = (el) => el.dataset.scope || el.closest('[data-scope]')?.dataset.scope || 'local';
+
+    // 单元格输入事件 - 自动保存 + 动态调整宽度
+    document.querySelectorAll('.horae-excel-table input').forEach(input => {
+        input.addEventListener('focus', (e) => {
+            e.target._horaeSnapshotPushed = false;
+        });
+        input.addEventListener('change', (e) => {
+            const scope = getScope(e.target);
+            const tableIndex = parseInt(e.target.dataset.table);
+            if (!e.target._horaeSnapshotPushed) {
+                pushTableSnapshot(scope, tableIndex);
+                e.target._horaeSnapshotPushed = true;
+            }
+            const row = parseInt(e.target.dataset.row);
+            const col = parseInt(e.target.dataset.col);
+            const value = e.target.value;
+
+            const tables = getTablesByScope(scope);
+            if (!tables[tableIndex]) return;
+            if (!tables[tableIndex].data) tables[tableIndex].data = {};
+            const key = `${row}-${col}`;
+            if (value.trim()) {
+                tables[tableIndex].data[key] = value;
+            } else {
+                delete tables[tableIndex].data[key];
+            }
+            if (row > 0 && col > 0) {
+                purgeTableContributions((tables[tableIndex].name || '').trim(), scope);
+            }
+            setTablesByScope(scope, tables);
+        });
+        input.addEventListener('input', (e) => {
+            const val = e.target.value;
+            const charLen = [...val].reduce((sum, ch) => sum + (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? 2 : 1), 0);
+            e.target.size = Math.max(4, Math.min(charLen + 2, 40));
+        });
+    });
+
+    // 表格名称输入事件
+    document.querySelectorAll('input[data-table-name]').forEach(input => {
+        input.addEventListener('change', (e) => {
+            const scope = getScope(e.target);
+            const tableIndex = parseInt(e.target.dataset.tableName);
+            pushTableSnapshot(scope, tableIndex);
+            const tables = getTablesByScope(scope);
+            if (!tables[tableIndex]) return;
+            tables[tableIndex].name = e.target.value;
+            setTablesByScope(scope, tables);
+        });
+    });
+
+    // 表格提示词输入事件
+    document.querySelectorAll('input[data-table-prompt]').forEach(input => {
+        input.addEventListener('change', (e) => {
+            const scope = getScope(e.target);
+            const tableIndex = parseInt(e.target.dataset.tablePrompt);
+            pushTableSnapshot(scope, tableIndex);
+            const tables = getTablesByScope(scope);
+            if (!tables[tableIndex]) return;
+            tables[tableIndex].prompt = e.target.value;
+            setTablesByScope(scope, tables);
+        });
+    });
+
+    // 导出表格按钮
+    document.querySelectorAll('.export-table-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const scope = getScope(btn);
+            const tableIndex = parseInt(btn.dataset.tableIndex);
+            exportTable(tableIndex, scope);
+        });
+    });
+
+    // 删除表格按钮
+    document.querySelectorAll('.delete-table-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const container = btn.closest('.horae-excel-table-container');
+            const scope = getScope(container);
+            const tableIndex = parseInt(container.dataset.tableIndex);
+            deleteCustomTable(tableIndex, scope);
+        });
+    });
+
+    // 清空表格数据按钮（保留表头）
+    document.querySelectorAll('.clear-table-data-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const scope = getScope(btn);
+            const tableIndex = parseInt(btn.dataset.tableIndex);
+            clearTableData(tableIndex, scope);
+        });
+    });
+
+    // 全局/本地切换
+    document.querySelectorAll('[data-toggle-scope]').forEach(el => {
+        el.addEventListener('click', (e) => {
+            const currentScope = el.dataset.scope;
+            const tableIndex = parseInt(el.dataset.toggleScope);
+            toggleTableScope(tableIndex, currentScope);
+        });
+    });
+    
+    // 所有单元格长按/右键显示菜单
+    document.querySelectorAll('.horae-excel-table th, .horae-excel-table td').forEach(cell => {
+        let pressTimer = null;
+
+        const startPress = (e) => {
+            pressTimer = setTimeout(() => {
+                const tableContainer = cell.closest('.horae-excel-table-container');
+                const tableIndex = parseInt(tableContainer.dataset.tableIndex);
+                const scope = tableContainer.dataset.scope || 'local';
+                const row = parseInt(cell.dataset.row);
+                const col = parseInt(cell.dataset.col);
+                showTableContextMenu(e, tableIndex, row, col, scope);
+            }, 500);
+        };
+
+        const cancelPress = () => {
+            if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+        };
+
+        cell.addEventListener('mousedown', (e) => { e.stopPropagation(); startPress(e); });
+        cell.addEventListener('touchstart', (e) => { e.stopPropagation(); startPress(e); }, { passive: false });
+        cell.addEventListener('mouseup', (e) => { e.stopPropagation(); cancelPress(); });
+        cell.addEventListener('mouseleave', cancelPress);
+        cell.addEventListener('touchend', (e) => { e.stopPropagation(); cancelPress(); });
+        cell.addEventListener('touchcancel', cancelPress);
+
+        cell.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const tableContainer = cell.closest('.horae-excel-table-container');
+            const tableIndex = parseInt(tableContainer.dataset.tableIndex);
+            const scope = tableContainer.dataset.scope || 'local';
+            const row = parseInt(cell.dataset.row);
+            const col = parseInt(cell.dataset.col);
+            showTableContextMenu(e, tableIndex, row, col, scope);
+        });
+    });
+
+    // 每个表格独立的撤回/复原按钮
+    document.querySelectorAll('.horae-table-undo-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            undoSingleTable(btn.dataset.tableId);
+        });
+    });
+    document.querySelectorAll('.horae-table-redo-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            redoSingleTable(btn.dataset.tableId);
+        });
+    });
+}
+
+/** 显示表格右键菜单 */
+let contextMenuCloseHandler = null;
+
+function showTableContextMenu(e, tableIndex, row, col, scope = 'local') {
+    hideContextMenu();
+
+    const tables = getTablesByScope(scope);
+    const table = tables[tableIndex];
+    if (!table) return;
+    const lockedRows = new Set(table.lockedRows || []);
+    const lockedCols = new Set(table.lockedCols || []);
+    const lockedCells = new Set(table.lockedCells || []);
+    const cellKey = `${row}-${col}`;
+    const isCellLocked = lockedCells.has(cellKey) || lockedRows.has(row) || lockedCols.has(col);
+
+    const isRowHeader = col === 0;
+    const isColHeader = row === 0;
+    const isCorner = row === 0 && col === 0;
+
+    let menuItems = '';
+
+    // 行操作（第一列所有行 / 任何单元格都能添加行）
+    if (isCorner) {
+        menuItems += `
+            <div class="horae-context-menu-item" data-action="add-row-below"><i class="fa-solid fa-plus"></i> ${t('ui.addRowBelow')}</div>
+            <div class="horae-context-menu-item" data-action="add-col-right"><i class="fa-solid fa-plus"></i> ${t('ui.addColRight')}</div>
+        `;
+    } else if (isColHeader) {
+        const colLocked = lockedCols.has(col);
+        menuItems += `
+            <div class="horae-context-menu-item" data-action="add-col-left"><i class="fa-solid fa-arrow-left"></i> ${t('ui.addColLeft')}</div>
+            <div class="horae-context-menu-item" data-action="add-col-right"><i class="fa-solid fa-arrow-right"></i> ${t('ui.addColRight')}</div>
+            <div class="horae-context-menu-divider"></div>
+            <div class="horae-context-menu-item" data-action="toggle-lock-col"><i class="fa-solid ${colLocked ? 'fa-lock-open' : 'fa-lock'}"></i> ${colLocked ? t('ui.unlockCol') : t('ui.lockCol')}</div>
+            <div class="horae-context-menu-divider"></div>
+            <div class="horae-context-menu-item danger" data-action="delete-col"><i class="fa-solid fa-trash-can"></i> ${t('ui.deleteCol')}</div>
+        `;
+    } else if (isRowHeader) {
+        const rowLocked = lockedRows.has(row);
+        menuItems += `
+            <div class="horae-context-menu-item" data-action="add-row-above"><i class="fa-solid fa-arrow-up"></i> ${t('ui.addRowAbove')}</div>
+            <div class="horae-context-menu-item" data-action="add-row-below"><i class="fa-solid fa-arrow-down"></i> ${t('ui.addRowBelow')}</div>
+            <div class="horae-context-menu-divider"></div>
+            <div class="horae-context-menu-item" data-action="toggle-lock-row"><i class="fa-solid ${rowLocked ? 'fa-lock-open' : 'fa-lock'}"></i> ${rowLocked ? t('ui.unlockRow') : t('ui.lockRow')}</div>
+            <div class="horae-context-menu-divider"></div>
+            <div class="horae-context-menu-item danger" data-action="delete-row"><i class="fa-solid fa-trash-can"></i> ${t('ui.deleteRow')}</div>
+        `;
+    } else {
+        // 普通数据单元格
+        menuItems += `
+            <div class="horae-context-menu-item" data-action="add-row-above"><i class="fa-solid fa-arrow-up"></i> ${t('ui.addRowAbove')}</div>
+            <div class="horae-context-menu-item" data-action="add-row-below"><i class="fa-solid fa-arrow-down"></i> ${t('ui.addRowBelow')}</div>
+            <div class="horae-context-menu-item" data-action="add-col-left"><i class="fa-solid fa-arrow-left"></i> ${t('ui.addColLeft')}</div>
+            <div class="horae-context-menu-item" data-action="add-col-right"><i class="fa-solid fa-arrow-right"></i> ${t('ui.addColRight')}</div>
+        `;
+    }
+
+    // 所有非角落单元格都可以锁定/解锁单格
+    if (!isCorner) {
+        const cellLocked = lockedCells.has(cellKey);
+        menuItems += `
+            <div class="horae-context-menu-divider"></div>
+            <div class="horae-context-menu-item" data-action="toggle-lock-cell"><i class="fa-solid ${cellLocked ? 'fa-lock-open' : 'fa-lock'}"></i> ${cellLocked ? t('ui.unlockCell') : t('ui.lockCell')}</div>
+        `;
+    }
+    
+    const menu = document.createElement('div');
+    menu.className = 'horae-context-menu';
+    if (isLightMode()) menu.classList.add('horae-light');
+    menu.innerHTML = menuItems;
+    
+    // 获取位置
+    const x = e.clientX || e.touches?.[0]?.clientX || 100;
+    const y = e.clientY || e.touches?.[0]?.clientY || 100;
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+    
+    document.body.appendChild(menu);
+    activeContextMenu = menu;
+    
+    // 确保菜单不超出屏幕
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+        menu.style.left = `${window.innerWidth - rect.width - 10}px`;
+    }
+    if (rect.bottom > window.innerHeight) {
+        menu.style.top = `${window.innerHeight - rect.height - 10}px`;
+    }
+    
+    // 绑定菜单项点击 - 执行操作后关闭菜单
+    menu.querySelectorAll('.horae-context-menu-item').forEach(item => {
+        item.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            ev.stopImmediatePropagation();
+            const action = item.dataset.action;
+            hideContextMenu();
+            setTimeout(() => {
+                executeTableAction(tableIndex, row, col, action, scope);
+            }, 10);
+        });
+        
+        item.addEventListener('touchend', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            ev.stopImmediatePropagation();
+            const action = item.dataset.action;
+            hideContextMenu();
+            setTimeout(() => {
+                executeTableAction(tableIndex, row, col, action, scope);
+            }, 10);
+        });
+    });
+    
+    ['click', 'touchstart', 'touchend', 'mousedown', 'mouseup'].forEach(eventType => {
+        menu.addEventListener(eventType, (ev) => {
+            ev.stopPropagation();
+            ev.stopImmediatePropagation();
+        });
+    });
+    
+    // 延迟绑定，避免当前事件触发
+    setTimeout(() => {
+        contextMenuCloseHandler = (ev) => {
+            if (activeContextMenu && !activeContextMenu.contains(ev.target)) {
+                hideContextMenu();
+            }
+        };
+        document.addEventListener('click', contextMenuCloseHandler, true);
+        document.addEventListener('touchstart', contextMenuCloseHandler, true);
+    }, 50);
+    
+    e.preventDefault();
+    e.stopPropagation();
+}
+
+/**
+ * 隐藏右键菜单
+ */
+function hideContextMenu() {
+    if (contextMenuCloseHandler) {
+        document.removeEventListener('click', contextMenuCloseHandler, true);
+        document.removeEventListener('touchstart', contextMenuCloseHandler, true);
+        contextMenuCloseHandler = null;
+    }
+    
+    if (activeContextMenu) {
+        activeContextMenu.remove();
+        activeContextMenu = null;
+    }
+}
+
+/**
+ * 执行表格操作
+ */
+function executeTableAction(tableIndex, row, col, action, scope = 'local') {
+    pushTableSnapshot(scope, tableIndex);
+    // 先将DOM中未提交的输入值写入data，防止正在编辑的值丢失
+    const container = document.querySelector(`.horae-excel-table-container[data-table-index="${tableIndex}"][data-scope="${scope}"]`);
+    if (container) {
+        const tbl = getTablesByScope(scope)[tableIndex];
+        if (tbl) {
+            if (!tbl.data) tbl.data = {};
+            container.querySelectorAll('.horae-excel-table input[data-table]').forEach(inp => {
+                const r = parseInt(inp.dataset.row);
+                const c = parseInt(inp.dataset.col);
+                tbl.data[`${r}-${c}`] = inp.value;
+            });
+        }
+    }
+
+    const tables = getTablesByScope(scope);
+    const table = tables[tableIndex];
+    if (!table) return;
+
+    const oldRows = table.rows || 2;
+    const oldCols = table.cols || 2;
+    const oldData = table.data || {};
+    const newData = {};
+
+    switch (action) {
+        case 'add-row-above':
+            table.rows = oldRows + 1;
+            for (const [key, val] of Object.entries(oldData)) {
+                const [r, c] = key.split('-').map(Number);
+                newData[`${r >= row ? r + 1 : r}-${c}`] = val;
+            }
+            table.data = newData;
+            break;
+
+        case 'add-row-below':
+            table.rows = oldRows + 1;
+            for (const [key, val] of Object.entries(oldData)) {
+                const [r, c] = key.split('-').map(Number);
+                newData[`${r > row ? r + 1 : r}-${c}`] = val;
+            }
+            table.data = newData;
+            break;
+
+        case 'add-col-left':
+            table.cols = oldCols + 1;
+            for (const [key, val] of Object.entries(oldData)) {
+                const [r, c] = key.split('-').map(Number);
+                newData[`${r}-${c >= col ? c + 1 : c}`] = val;
+            }
+            table.data = newData;
+            break;
+
+        case 'add-col-right':
+            table.cols = oldCols + 1;
+            for (const [key, val] of Object.entries(oldData)) {
+                const [r, c] = key.split('-').map(Number);
+                newData[`${r}-${c > col ? c + 1 : c}`] = val;
+            }
+            table.data = newData;
+            break;
+
+        case 'delete-row':
+            if (oldRows <= 2) { showToast(t('toast.tableMinRows'), 'warning'); return; }
+            table.rows = oldRows - 1;
+            for (const [key, val] of Object.entries(oldData)) {
+                const [r, c] = key.split('-').map(Number);
+                if (r === row) continue;
+                newData[`${r > row ? r - 1 : r}-${c}`] = val;
+            }
+            table.data = newData;
+            purgeTableContributions((table.name || '').trim(), scope);
+            break;
+
+        case 'delete-col':
+            if (oldCols <= 2) { showToast(t('toast.tableMinCols'), 'warning'); return; }
+            table.cols = oldCols - 1;
+            for (const [key, val] of Object.entries(oldData)) {
+                const [r, c] = key.split('-').map(Number);
+                if (c === col) continue;
+                newData[`${r}-${c > col ? c - 1 : c}`] = val;
+            }
+            table.data = newData;
+            purgeTableContributions((table.name || '').trim(), scope);
+            break;
+
+        case 'toggle-lock-row': {
+            if (!table.lockedRows) table.lockedRows = [];
+            const idx = table.lockedRows.indexOf(row);
+            if (idx >= 0) {
+                table.lockedRows.splice(idx, 1);
+                showToast(t('toast.rowUnlocked', {n: row + 1}), 'info');
+            } else {
+                table.lockedRows.push(row);
+                showToast(t('toast.rowLocked', {n: row + 1}), 'success');
+            }
+            break;
+        }
+
+        case 'toggle-lock-col': {
+            if (!table.lockedCols) table.lockedCols = [];
+            const idx = table.lockedCols.indexOf(col);
+            if (idx >= 0) {
+                table.lockedCols.splice(idx, 1);
+                showToast(t('toast.colUnlocked', {n: col + 1}), 'info');
+            } else {
+                table.lockedCols.push(col);
+                showToast(t('toast.colLocked', {n: col + 1}), 'success');
+            }
+            break;
+        }
+
+        case 'toggle-lock-cell': {
+            if (!table.lockedCells) table.lockedCells = [];
+            const cellKey = `${row}-${col}`;
+            const idx = table.lockedCells.indexOf(cellKey);
+            if (idx >= 0) {
+                table.lockedCells.splice(idx, 1);
+                showToast(t('toast.cellUnlocked', {row, col}), 'info');
+            } else {
+                table.lockedCells.push(cellKey);
+                showToast(t('toast.cellLocked', {row, col}), 'success');
+            }
+            break;
+        }
+    }
+
+    setTablesByScope(scope, tables);
+    renderCustomTablesList();
+}
+
+/**
+ * 添加新的2x2表格
+ */
+function addNewExcelTable(scope = 'local') {
+    const tables = getTablesByScope(scope);
+
+    tables.push({
+        id: Date.now().toString(),
+        name: '',
+        rows: 2,
+        cols: 2,
+        data: {},
+        baseData: {},
+        baseRows: 2,
+        baseCols: 2,
+        prompt: '',
+        lockedRows: [],
+        lockedCols: [],
+        lockedCells: []
+    });
+
+    setTablesByScope(scope, tables);
+    renderCustomTablesList();
+    const toastKey = { global: 'toast.tableAddedGlobal', character: 'toast.tableAddedCharacter', local: 'toast.tableAddedLocal' };
+    showToast(t(toastKey[scope] || toastKey.local), 'success');
+}
+
+/**
+ * 删除表格
+ */
+function deleteCustomTable(index, scope = 'local') {
+    if (!confirm(t('confirm.deleteTable'))) return;
+    pushTableSnapshot(scope, index);
+
+    const tables = getTablesByScope(scope);
+    const deletedTable = tables[index];
+    const deletedName = (deletedTable?.name || '').trim();
+    tables.splice(index, 1);
+    setTablesByScope(scope, tables);
+
+    // 清除所有消息中引用该表格名的 tableContributions
+    const chat = horaeManager.getChat();
+    if (deletedName) {
+        for (let i = 0; i < chat.length; i++) {
+            const meta = chat[i]?.horae_meta;
+            if (meta?.tableContributions) {
+                meta.tableContributions = meta.tableContributions.filter(
+                    tc => (tc.name || '').trim() !== deletedName
+                );
+                if (meta.tableContributions.length === 0) {
+                    delete meta.tableContributions;
+                }
+            }
+        }
+    }
+
+    // 全局表格：清除 per-card overlay
+    if (scope === 'global' && deletedName && chat?.[0]?.horae_meta?.globalTableData) {
+        delete chat[0].horae_meta.globalTableData[deletedName];
+    }
+    // 角色表格：清除 per-chat overlay
+    if (scope === 'character' && deletedName && chat?.[0]?.horae_meta?.charTableData) {
+        delete chat[0].horae_meta.charTableData[deletedName];
+    }
+
+    horaeManager.rebuildTableData();
+    getContext().saveChat();
+    if ((scope === 'global' || scope === 'character') && typeof saveSettingsDebounced.flush === 'function') {
+        saveSettingsDebounced.flush();
+    }
+    renderCustomTablesList();
+    showToast(t('toast.saveSuccess'), 'info');
+}
+
+/** 清除指定表格的所有 tableContributions，将当前数据写入 baseData 作为新基准 */
+function purgeTableContributions(tableName, scope = 'local') {
+    if (!tableName) return;
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return;
+
+    // 清除所有消息中该表格的全部 tableContributions（AI 贡献 + 旧用户快照一并清除）
+    for (let i = 0; i < chat.length; i++) {
+        const meta = chat[i]?.horae_meta;
+        if (meta?.tableContributions) {
+            meta.tableContributions = meta.tableContributions.filter(
+                tc => (tc.name || '').trim() !== tableName
+            );
+            if (meta.tableContributions.length === 0) {
+                delete meta.tableContributions;
+            }
+        }
+    }
+
+    // 将当前完整数据（含用户编辑）写入 baseData 作为新基准
+    // 这样即使消息被滑动/重新生成，rebuildTableData 也能从正确的基准恢复
+    const tables = getTablesByScope(scope);
+    const table = tables.find(tbl => (tbl.name || '').trim() === tableName);
+    if (table) {
+        table.baseData = JSON.parse(JSON.stringify(table.data || {}));
+        table.baseRows = table.rows;
+        table.baseCols = table.cols;
+    }
+    if (scope === 'global' && chat[0]?.horae_meta?.globalTableData?.[tableName]) {
+        const overlay = chat[0].horae_meta.globalTableData[tableName];
+        overlay.baseData = JSON.parse(JSON.stringify(overlay.data || {}));
+        overlay.baseRows = overlay.rows;
+        overlay.baseCols = overlay.cols;
+    }
+    if (scope === 'character' && chat[0]?.horae_meta?.charTableData?.[tableName]) {
+        const overlay = chat[0].horae_meta.charTableData[tableName];
+        overlay.baseData = JSON.parse(JSON.stringify(overlay.data || {}));
+        overlay.baseRows = overlay.rows;
+        overlay.baseCols = overlay.cols;
+    }
+}
+
+/** 清空表格数据区（保留第0行和第0列的表头） */
+function clearTableData(index, scope = 'local') {
+    if (!confirm(t('confirm.clearTableData'))) return;
+    pushTableSnapshot(scope, index);
+
+    const tables = getTablesByScope(scope);
+    if (!tables[index]) return;
+    const table = tables[index];
+    const data = table.data || {};
+    const tableName = (table.name || '').trim();
+
+    // 删除所有 row>0 且 col>0 的单元格数据
+    for (const key of Object.keys(data)) {
+        const [r, c] = key.split('-').map(Number);
+        if (r > 0 && c > 0) {
+            delete data[key];
+        }
+    }
+
+    table.data = data;
+
+    // 同步更新 baseData（清除数据区，保留表头）
+    if (table.baseData) {
+        for (const key of Object.keys(table.baseData)) {
+            const [r, c] = key.split('-').map(Number);
+            if (r > 0 && c > 0) {
+                delete table.baseData[key];
+            }
+        }
+    }
+
+    // 清除所有消息中该表格的 tableContributions（防止 rebuildTableData 回放旧数据）
+    const chat = horaeManager.getChat();
+    if (tableName) {
+        for (let i = 0; i < chat.length; i++) {
+            const meta = chat[i]?.horae_meta;
+            if (meta?.tableContributions) {
+                meta.tableContributions = meta.tableContributions.filter(
+                    tc => (tc.name || '').trim() !== tableName
+                );
+                if (meta.tableContributions.length === 0) {
+                    delete meta.tableContributions;
+                }
+            }
+        }
+    }
+
+    // 全局/角色表格：同步清除 overlay 的数据区和 baseData
+    const overlayKey = scope === 'global' ? 'globalTableData' : scope === 'character' ? 'charTableData' : null;
+    if (overlayKey && tableName && chat?.[0]?.horae_meta?.[overlayKey]?.[tableName]) {
+        const overlay = chat[0].horae_meta[overlayKey][tableName];
+        for (const key of Object.keys(overlay.data || {})) {
+            const [r, c] = key.split('-').map(Number);
+            if (r > 0 && c > 0) delete overlay.data[key];
+        }
+        if (overlay.baseData) {
+            for (const key of Object.keys(overlay.baseData)) {
+                const [r, c] = key.split('-').map(Number);
+                if (r > 0 && c > 0) delete overlay.baseData[key];
+            }
+        }
+    }
+
+    setTablesByScope(scope, tables);
+    horaeManager.rebuildTableData();
+    getContext().saveChat();
+    renderCustomTablesList();
+    showToast(t('toast.saveSuccess'), 'info');
+}
+
+/** 切换表格的 scope：local → character → global → local */
+function toggleTableScope(tableIndex, currentScope) {
+    const scopeCycle = ['local', 'character', 'global'];
+    const curIdx = scopeCycle.indexOf(currentScope);
+    const newScope = scopeCycle[(curIdx + 1) % scopeCycle.length];
+
+    if (newScope === 'character' && getContext()?.characterId == null) {
+        showToast(t('toast.noCharacterCard'), 'warning');
+        return;
+    }
+
+    const labelMap = {
+        global: t('ui.scopeGlobalFull'),
+        character: t('ui.scopeCharacterFull'),
+        local: t('ui.scopeLocalFull'),
+    };
+    const label = labelMap[newScope];
+    if (!confirm(t('confirm.convertTableScope', {scope: label}))) return;
+    pushTableSnapshot(currentScope, tableIndex);
+
+    const srcTables = getTablesByScope(currentScope);
+    if (!srcTables[tableIndex]) return;
+    const table = JSON.parse(JSON.stringify(srcTables[tableIndex]));
+    const tableName = (table.name || '').trim();
+
+    if (currentScope === 'global' && tableName) {
+        const chat = horaeManager.getChat();
+        if (chat?.[0]?.horae_meta?.globalTableData) {
+            delete chat[0].horae_meta.globalTableData[tableName];
+        }
+    }
+    if (currentScope === 'character' && tableName) {
+        const chat = horaeManager.getChat();
+        if (chat?.[0]?.horae_meta?.charTableData) {
+            delete chat[0].horae_meta.charTableData[tableName];
+        }
+    }
+
+    srcTables.splice(tableIndex, 1);
+    setTablesByScope(currentScope, srcTables);
+
+    const dstTables = getTablesByScope(newScope);
+    dstTables.push(table);
+    setTablesByScope(newScope, dstTables);
+
+    renderCustomTablesList();
+    getContext().saveChat();
+    showToast(t('toast.tableScopeChanged', {scope: label}), 'success');
+}
+
+
+/**
+ * 绑定物品列表事件
+ */
+function bindItemsEvents() {
+    const items = document.querySelectorAll('#horae-items-full-list .horae-full-item');
+    
+    items.forEach(item => {
+        const itemName = item.dataset.itemName;
+        if (!itemName) return;
+        
+        // 长按进入多选模式
+        item.addEventListener('mousedown', (e) => startLongPress(e, itemName));
+        item.addEventListener('touchstart', (e) => startLongPress(e, itemName), { passive: true });
+        item.addEventListener('mouseup', cancelLongPress);
+        item.addEventListener('mouseleave', cancelLongPress);
+        item.addEventListener('touchend', cancelLongPress);
+        item.addEventListener('touchcancel', cancelLongPress);
+        
+        // 多选模式下点击切换选中
+        item.addEventListener('click', () => {
+            if (itemsMultiSelectMode) {
+                toggleItemSelection(itemName);
+            }
+        });
+    });
+
+    document.querySelectorAll('.horae-item-equip-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            _openEquipItemDialog(btn.dataset.itemName);
+        });
+    });
+
+    document.querySelectorAll('.horae-item-lock-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const name = btn.dataset.itemName;
+            if (!name) return;
+            const state = horaeManager.getLatestState();
+            const itemInfo = state.items?.[name];
+            if (!itemInfo) return;
+            const chat = horaeManager.getChat();
+            for (let i = chat.length - 1; i >= 0; i--) {
+                const meta = chat[i]?.horae_meta;
+                if (!meta?.items) continue;
+                const key = Object.keys(meta.items).find(k => k === name || k.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u, '').trim() === name);
+                if (key) {
+                    meta.items[key]._locked = !meta.items[key]._locked;
+                    getContext().saveChat();
+                    updateItemsDisplay();
+                    showToast(meta.items[key]._locked ? t('toast.itemLocked', {name}) : t('toast.itemUnlocked', {name}), meta.items[key]._locked ? 'success' : 'info');
+                    return;
+                }
+            }
+            const first = chat[0];
+            if (!first.horae_meta) first.horae_meta = createEmptyMeta();
+            if (!first.horae_meta.items) first.horae_meta.items = {};
+            first.horae_meta.items[name] = { ...itemInfo, _locked: true };
+            getContext().saveChat();
+            updateItemsDisplay();
+            showToast(t('toast.itemLocked', {name}), 'success');
+        });
+    });
+}
+
+// ═══════════════════════════════════════════════════
+//  装备穿脱系统 — 物品栏 ↔ 装备栏 原子移动
+// ═══════════════════════════════════════════════════
+
+/**
+ * 从物品栏穿戴到装备栏
+ * @param {string} itemName 物品名
+ * @param {string} owner    角色名
+ * @param {string} slotName 格位名
+ * @param {object} [replacedItem] 被替换的旧装备（自动归还物品栏）
+ */
+function _equipItemToChar(itemName, owner, slotName, replacedItem) {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return;
+    const first = chat[0];
+    if (!first.horae_meta) first.horae_meta = createEmptyMeta();
+    const state = horaeManager.getLatestState();
+    const itemInfo = state.items?.[itemName];
+    if (!itemInfo) { showToast(t('toast.itemNotFound', {name: itemName}), 'warning'); return; }
+
+    if (!first.horae_meta.rpg) first.horae_meta.rpg = {};
+    const rpg = first.horae_meta.rpg;
+    if (!rpg.equipment) rpg.equipment = {};
+
+    // 被替换的旧装备归还物品栏（在重建数组前执行）
+    if (replacedItem) {
+        _unequipToItems(owner, slotName, replacedItem.name, true);
+    }
+
+    // 确保目标数组存在（unequip 可能删除了空数组）
+    if (!rpg.equipment[owner]) rpg.equipment[owner] = {};
+    if (!rpg.equipment[owner][slotName]) rpg.equipment[owner][slotName] = [];
+
+    // 构建装备条目（携带完整物品信息）
+    const eqEntry = {
+        name: itemName,
+        attrs: {},
+        _itemMeta: {
+            icon: itemInfo.icon || '',
+            description: itemInfo.description || '',
+            importance: itemInfo.importance || '',
+            _id: itemInfo._id || '',
+            _locked: itemInfo._locked || false,
+        },
+    };
+    // 已有装备属性（从 eqAttrMap 等来源）
+    const existingEqData = _findExistingEquipAttrs(itemName);
+    if (existingEqData) eqEntry.attrs = { ...existingEqData };
+
+    rpg.equipment[owner][slotName].push(eqEntry);
+
+    // 从物品栏中移除
+    _removeItemFromState(itemName);
+
+    getContext().saveChat();
+}
+
+/**
+ * 脱下装备归还物品栏
+ */
+function _unequipToItems(owner, slotName, equipName, skipSave) {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return;
+    const first = chat[0];
+    if (!first.horae_meta?.rpg?.equipment?.[owner]?.[slotName]) return;
+
+    const slotArr = first.horae_meta.rpg.equipment[owner][slotName];
+    const idx = slotArr.findIndex(e => e.name === equipName);
+    if (idx < 0) return;
+    const removed = slotArr.splice(idx, 1)[0];
+
+    // 清理空结构
+    if (!slotArr.length) delete first.horae_meta.rpg.equipment[owner][slotName];
+    if (first.horae_meta.rpg.equipment[owner] && !Object.keys(first.horae_meta.rpg.equipment[owner]).length) delete first.horae_meta.rpg.equipment[owner];
+
+    // 归还到物品栏
+    if (!first.horae_meta.items) first.horae_meta.items = {};
+    const meta = removed._itemMeta || {};
+    first.horae_meta.items[equipName] = {
+        icon: meta.icon || '📦',
+        description: meta.description || '',
+        importance: meta.importance || '',
+        holder: owner,
+        location: '',
+        _id: meta._id || '',
+        _locked: meta._locked || false,
+    };
+    // 恢复装备属性到描述
+    if (removed.attrs && Object.keys(removed.attrs).length > 0) {
+        const attrStr = Object.entries(removed.attrs).map(([k, v]) => `${k}${v >= 0 ? '+' : ''}${v}`).join(', ');
+        const desc = first.horae_meta.items[equipName].description;
+        if (!desc.includes(attrStr)) {
+            first.horae_meta.items[equipName].description = desc ? `${desc} (${attrStr})` : attrStr;
+        }
+    }
+
+    if (!skipSave) getContext().saveChat();
+}
+
+function _removeItemFromState(itemName) {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return;
+    for (let i = chat.length - 1; i >= 0; i--) {
+        const meta = chat[i]?.horae_meta;
+        if (meta?.items?.[itemName]) {
+            delete meta.items[itemName];
+            return;
+        }
+    }
+}
+
+function _findExistingEquipAttrs(itemName) {
+    try {
+        const rpg = horaeManager.getRpgStateAt(0);
+        for (const [, slots] of Object.entries(rpg.equipment || {})) {
+            for (const [, items] of Object.entries(slots)) {
+                const found = items.find(e => e.name === itemName);
+                if (found?.attrs && Object.keys(found.attrs).length > 0) return { ...found.attrs };
+            }
+        }
+    } catch (_) { /* ignore */ }
+    return null;
+}
+
+/**
+ * 打开装备穿戴对话框：选角色 → 选格位 → 穿戴
+ */
+function _openEquipItemDialog(itemName) {
+    const cfgMap = _getEqConfigMap();
+    const perChar = cfgMap.perChar || {};
+    const candidates = Object.entries(perChar).filter(([, cfg]) => cfg.slots?.length > 0);
+    if (!candidates.length) {
+        showToast(t('toast.noEquipChars'), 'warning');
+        return;
+    }
+    const state = horaeManager.getLatestState();
+    const itemInfo = state.items?.[itemName];
+    if (!itemInfo) return;
+
+    const modal = document.createElement('div');
+    modal.className = 'horae-modal';
+
+    let bodyHtml = `<div class="horae-edit-field"><label>${t('label.selectCharacter')}</label><select id="horae-equip-char">`;
+    for (const [owner] of candidates) {
+        bodyHtml += `<option value="${escapeHtml(owner)}">${escapeHtml(owner)}</option>`;
+    }
+    bodyHtml += `</select></div>`;
+    bodyHtml += `<div class="horae-edit-field"><label>${t('label.selectSlot')}</label><select id="horae-equip-slot"></select></div>`;
+    bodyHtml += `<div id="horae-equip-conflict" style="color:#ef4444;font-size:.85em;margin-top:4px;display:none;"></div>`;
+
+    modal.innerHTML = `
+        <div class="horae-modal-content" style="max-width:400px;width:92vw;box-sizing:border-box;">
+            <div class="horae-modal-header"><h3>${t('modal.addEquipment')}</h3></div>
+            <div class="horae-modal-body">${bodyHtml}</div>
+            <div class="horae-modal-footer">
+                <button id="horae-equip-ok" class="horae-btn primary">${t('common.confirm')}</button>
+                <button id="horae-equip-cancel" class="horae-btn">${t('common.cancel')}</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    preventModalBubble(modal);
+
+    const charSel = modal.querySelector('#horae-equip-char');
+    const slotSel = modal.querySelector('#horae-equip-slot');
+    const conflictDiv = modal.querySelector('#horae-equip-conflict');
+
+    const _updateSlots = () => {
+        const owner = charSel.value;
+        const cfg = perChar[owner];
+        if (!cfg?.slots?.length) { slotSel.innerHTML = `<option>${t('levels.none')}</option>`; return; }
+        const eqValues = _getEqValues();
+        const ownerEq = eqValues[owner] || {};
+        slotSel.innerHTML = cfg.slots.map(s => {
+            const cur = (ownerEq[s.name] || []).length;
+            const max = s.maxCount ?? 1;
+            return `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)} (${cur}/${max})</option>`;
+        }).join('');
+        _checkConflict();
+    };
+
+    const _checkConflict = () => {
+        const owner = charSel.value;
+        const slotName = slotSel.value;
+        const cfg = perChar[owner];
+        const slotCfg = cfg?.slots?.find(s => s.name === slotName);
+        const max = slotCfg?.maxCount ?? 1;
+        const eqValues = _getEqValues();
+        const existing = eqValues[owner]?.[slotName] || [];
+        if (existing.length >= max) {
+            const oldest = existing[0];
+            conflictDiv.style.display = '';
+            conflictDiv.textContent = t('toast.slotConflict', {slot: slotName, max, oldest: oldest.name});
+        } else {
+            conflictDiv.style.display = 'none';
+        }
+    };
+
+    charSel.addEventListener('change', _updateSlots);
+    slotSel.addEventListener('change', _checkConflict);
+    _updateSlots();
+
+    modal.querySelector('#horae-equip-ok').onclick = () => {
+        const owner = charSel.value;
+        const slotName = slotSel.value;
+        if (!owner || !slotName) return;
+        const cfg = perChar[owner];
+        const slotCfg = cfg?.slots?.find(s => s.name === slotName);
+        const max = slotCfg?.maxCount ?? 1;
+        const eqValues = _getEqValues();
+        const existing = eqValues[owner]?.[slotName] || [];
+        const replaced = existing.length >= max ? existing[0] : null;
+
+        _equipItemToChar(itemName, owner, slotName, replaced);
+        modal.remove();
+        updateItemsDisplay();
+        renderEquipmentValues();
+        _bindEquipmentEvents();
+        updateAllRpgHuds();
+        showToast(t('toast.itemEquipped', {item: itemName, owner, slot: slotName}), 'success');
+    };
+
+    modal.querySelector('#horae-equip-cancel').onclick = () => modal.remove();
+}
+
+/**
+ * 开始长按计时
+ */
+function startLongPress(e, itemName) {
+    if (itemsMultiSelectMode) return; // 已在多选模式
+    
+    longPressTimer = setTimeout(() => {
+        enterMultiSelectMode(itemName);
+    }, 800); // 800ms 长按触发（延长防止误触）
+}
+
+/**
+ * 取消长按
+ */
+function cancelLongPress() {
+    if (longPressTimer) {
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
+    }
+}
+
+/**
+ * 进入多选模式
+ */
+function enterMultiSelectMode(initialItem) {
+    itemsMultiSelectMode = true;
+    selectedItems.clear();
+    if (initialItem) {
+        selectedItems.add(initialItem);
+    }
+    
+    // 显示多选工具栏
+    const bar = document.getElementById('horae-items-multiselect-bar');
+    if (bar) bar.style.display = 'flex';
+    
+    // 隐藏提示
+    const hint = document.querySelector('#horae-tab-items .horae-items-hint');
+    if (hint) hint.style.display = 'none';
+    
+    updateItemsDisplay();
+    updateSelectedCount();
+    
+    showToast(t('toast.agendaMultiSelect'), 'info');
+}
+
+/**
+ * 退出多选模式
+ */
+function exitMultiSelectMode() {
+    itemsMultiSelectMode = false;
+    selectedItems.clear();
+    
+    // 隐藏多选工具栏
+    const bar = document.getElementById('horae-items-multiselect-bar');
+    if (bar) bar.style.display = 'none';
+    
+    // 显示提示
+    const hint = document.querySelector('#horae-tab-items .horae-items-hint');
+    if (hint) hint.style.display = 'block';
+    
+    updateItemsDisplay();
+}
+
+/**
+ * 切换物品选中状态
+ */
+function toggleItemSelection(itemName) {
+    if (selectedItems.has(itemName)) {
+        selectedItems.delete(itemName);
+    } else {
+        selectedItems.add(itemName);
+    }
+    
+    // 更新UI
+    const item = document.querySelector(`#horae-items-full-list .horae-full-item[data-item-name="${itemName}"]`);
+    if (item) {
+        const checkbox = item.querySelector('input[type="checkbox"]');
+        if (checkbox) checkbox.checked = selectedItems.has(itemName);
+        item.classList.toggle('selected', selectedItems.has(itemName));
+    }
+    
+    updateSelectedCount();
+}
+
+/**
+ * 全选物品
+ */
+function selectAllItems() {
+    const items = document.querySelectorAll('#horae-items-full-list .horae-full-item');
+    items.forEach(item => {
+        const name = item.dataset.itemName;
+        if (name) selectedItems.add(name);
+    });
+    updateItemsDisplay();
+    updateSelectedCount();
+}
+
+/**
+ * 更新选中数量显示
+ */
+function updateSelectedCount() {
+    const countEl = document.getElementById('horae-items-selected-count');
+    if (countEl) countEl.textContent = selectedItems.size;
+}
+
+/**
+ * 删除选中的物品
+ */
+async function deleteSelectedItems() {
+    if (selectedItems.size === 0) {
+        showToast(t('toast.insufficientEvents'), 'warning');
+        return;
+    }
+    
+    // 确认对话框
+    const confirmed = confirm(t('confirm.deleteTimeline', {n: selectedItems.size}));
+    if (!confirmed) return;
+    
+    // 从所有消息的 meta 中删除这些物品
+    const chat = horaeManager.getChat();
+    const itemsToDelete = Array.from(selectedItems);
+    
+    for (let i = 0; i < chat.length; i++) {
+        const meta = chat[i].horae_meta;
+        if (meta && meta.items) {
+            let changed = false;
+            for (const itemName of itemsToDelete) {
+                if (meta.items[itemName]) {
+                    delete meta.items[itemName];
+                    changed = true;
+                }
+            }
+            if (changed) injectHoraeTagToMessage(i, meta);
+        }
+    }
+    
+    // 保存更改
+    await getContext().saveChat();
+    
+    showToast(t('toast.saveSuccess'), 'success');
+    
+    exitMultiSelectMode();
+    updateStatusDisplay();
+}
+
+// ============================================
+// NPC 多选模式
+// ============================================
+
+function enterNpcMultiSelect(initialName) {
+    npcMultiSelectMode = true;
+    selectedNpcs.clear();
+    if (initialName) selectedNpcs.add(initialName);
+    const bar = document.getElementById('horae-npc-multiselect-bar');
+    if (bar) bar.style.display = 'flex';
+    const btn = document.getElementById('horae-btn-npc-multiselect');
+    if (btn) { btn.classList.add('active'); btn.title = t('ui.exitMultiSelect'); }
+    updateCharactersDisplay();
+    _updateNpcSelectedCount();
+}
+
+function exitNpcMultiSelect() {
+    npcMultiSelectMode = false;
+    selectedNpcs.clear();
+    const bar = document.getElementById('horae-npc-multiselect-bar');
+    if (bar) bar.style.display = 'none';
+    const btn = document.getElementById('horae-btn-npc-multiselect');
+    if (btn) { btn.classList.remove('active'); btn.title = t('ui.multiSelectMode'); }
+    updateCharactersDisplay();
+}
+
+function toggleNpcSelection(name) {
+    if (selectedNpcs.has(name)) selectedNpcs.delete(name);
+    else selectedNpcs.add(name);
+    const item = document.querySelector(`#horae-npc-list .horae-npc-item[data-npc-name="${name}"]`);
+    if (item) {
+        const cb = item.querySelector('.horae-npc-select-cb input');
+        if (cb) cb.checked = selectedNpcs.has(name);
+        item.classList.toggle('selected', selectedNpcs.has(name));
+    }
+    _updateNpcSelectedCount();
+}
+
+function _updateNpcSelectedCount() {
+    const el = document.getElementById('horae-npc-selected-count');
+    if (el) el.textContent = selectedNpcs.size;
+}
+
+async function deleteSelectedNpcs() {
+    if (selectedNpcs.size === 0) { showToast(t('toast.insufficientEvents'), 'warning'); return; }
+    if (!confirm(t('confirm.deleteNpc', {name: `${selectedNpcs.size}`}))) return;
+    
+    _cascadeDeleteNpcs(Array.from(selectedNpcs));
+    await getContext().saveChat();
+    showToast(t('toast.saveSuccess'), 'success');
+    exitNpcMultiSelect();
+    refreshAllDisplays();
+}
+
+// 异常状态 → FontAwesome 图标映射
+const RPG_STATUS_ICONS = {
+    '昏': 'fa-dizzy', '眩': 'fa-dizzy', '晕': 'fa-dizzy', '暈': 'fa-dizzy',
+    '流血': 'fa-droplet', '出血': 'fa-droplet', '血': 'fa-droplet',
+    '重伤': 'fa-heart-crack', '重傷': 'fa-heart-crack', '濒死': 'fa-heart-crack', '瀕死': 'fa-heart-crack',
+    '冻': 'fa-snowflake', '凍': 'fa-snowflake', '冰': 'fa-snowflake', '寒': 'fa-snowflake',
+    '石化': 'fa-gem', '钙化': 'fa-gem', '鈣化': 'fa-gem', '结晶': 'fa-gem', '結晶': 'fa-gem',
+    '毒': 'fa-skull-crossbones', '腐蚀': 'fa-skull-crossbones', '腐蝕': 'fa-skull-crossbones',
+    '火': 'fa-fire', '烧': 'fa-fire', '燒': 'fa-fire', '灼': 'fa-fire', '燃': 'fa-fire', '炎': 'fa-fire',
+    '慢': 'fa-hourglass-half', '减速': 'fa-hourglass-half', '減速': 'fa-hourglass-half', '迟缓': 'fa-hourglass-half', '遲緩': 'fa-hourglass-half',
+    '盲': 'fa-eye-slash', '失明': 'fa-eye-slash',
+    '沉默': 'fa-comment-slash', '禁言': 'fa-comment-slash', '封印': 'fa-ban',
+    '麻': 'fa-bolt', '痹': 'fa-bolt', '痺': 'fa-bolt', '电': 'fa-bolt', '電': 'fa-bolt', '雷': 'fa-bolt',
+    '弱': 'fa-feather', '衰': 'fa-feather', '虚': 'fa-feather', '虛': 'fa-feather',
+    '恐': 'fa-ghost', '惧': 'fa-ghost', '懼': 'fa-ghost', '惊': 'fa-ghost', '驚': 'fa-ghost',
+    '乱': 'fa-shuffle', '亂': 'fa-shuffle', '混乱': 'fa-shuffle', '混亂': 'fa-shuffle', '狂暴': 'fa-shuffle',
+    '眠': 'fa-moon', '睡': 'fa-moon', '催眠': 'fa-moon',
+    '缚': 'fa-link', '縛': 'fa-link', '禁锢': 'fa-link', '禁錮': 'fa-link', '束': 'fa-link',
+    '饥': 'fa-utensils', '飢': 'fa-utensils', '饿': 'fa-utensils', '餓': 'fa-utensils', '饥饿': 'fa-utensils', '飢餓': 'fa-utensils',
+    '渴': 'fa-glass-water', '脱水': 'fa-glass-water', '脫水': 'fa-glass-water',
+    '疲': 'fa-battery-quarter', '累': 'fa-battery-quarter', '倦': 'fa-battery-quarter', '乏': 'fa-battery-quarter',
+    '伤': 'fa-bandage', '傷': 'fa-bandage', '创': 'fa-bandage', '創': 'fa-bandage',
+    '愈': 'fa-heart-pulse', '恢复': 'fa-heart-pulse', '恢復': 'fa-heart-pulse', '再生': 'fa-heart-pulse',
+    '隐': 'fa-user-secret', '隱': 'fa-user-secret', '伪装': 'fa-user-secret', '偽裝': 'fa-user-secret', '潜行': 'fa-user-secret', '潛行': 'fa-user-secret',
+    '护盾': 'fa-shield', '護盾': 'fa-shield', '防御': 'fa-shield', '防禦': 'fa-shield', '铁壁': 'fa-shield', '鐵壁': 'fa-shield',
+    '正常': 'fa-circle-check',
+};
+
+/** 根据异常状态文本匹配图标 */
+function getStatusIcon(text) {
+    for (const [kw, icon] of Object.entries(RPG_STATUS_ICONS)) {
+        if (text.includes(kw)) return icon;
+    }
+    return 'fa-triangle-exclamation';
+}
+
+/** 根据配置获取属性条颜色 */
+function getRpgBarColor(key) {
+    const cfg = (settings.rpgBarConfig || []).find(b => b.key === key);
+    return cfg?.color || '#6366f1';
+}
+
+/** 根据配置获取属性条显示名（用户自定义名 > AI标签 > 默认key大写） */
+function getRpgBarName(key, aiLabel) {
+    const cfg = (settings.rpgBarConfig || []).find(b => b.key === key);
+    const cfgName = cfg?.name;
+    if (cfgName && cfgName !== key.toUpperCase()) return cfgName;
+    return aiLabel || cfgName || key.toUpperCase();
+}
+
+// ============================================
+// RPG 骰子系统
+// ============================================
+
+const RPG_DICE_TYPES = [
+    { faces: 4,   label: 'D4' },
+    { faces: 6,   label: 'D6' },
+    { faces: 8,   label: 'D8' },
+    { faces: 10,  label: 'D10' },
+    { faces: 12,  label: 'D12' },
+    { faces: 20,  label: 'D20' },
+    { faces: 100, label: 'D100' },
+];
+
+function rollDice(count, faces, modifier = 0) {
+    const rolls = [];
+    for (let i = 0; i < count; i++) rolls.push(Math.ceil(Math.random() * faces));
+    const sum = rolls.reduce((a, b) => a + b, 0) + modifier;
+    const modStr = modifier > 0 ? `+${modifier}` : modifier < 0 ? `${modifier}` : '';
+    return {
+        notation: `${count}d${faces}${modStr}`,
+        rolls,
+        total: sum,
+        display: `🎲 ${count}d${faces}${modStr} = [${rolls.join(', ')}]${modStr} = ${sum}`,
+    };
+}
+
+function injectDiceToChat(text) {
+    const textarea = document.getElementById('send_textarea');
+    if (!textarea) return;
+    const cur = textarea.value;
+    textarea.value = cur ? `${cur}\n${text}` : text;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.focus();
+}
+
+let _diceAbort = null;
+function renderDicePanel() {
+    if (_diceAbort) { _diceAbort.abort(); _diceAbort = null; }
+    const existing = document.getElementById('horae-rpg-dice-panel');
+    if (existing) existing.remove();
+    if (!settings.rpgMode || !settings.rpgDiceEnabled) return;
+
+    _diceAbort = new AbortController();
+    const sig = _diceAbort.signal;
+
+    const btns = RPG_DICE_TYPES.map(d =>
+        `<button class="horae-rpg-dice-btn" data-faces="${d.faces}">${d.label}</button>`
+    ).join('');
+
+    const html = `
+        <div id="horae-rpg-dice-panel" class="horae-rpg-dice-panel">
+            <div class="horae-rpg-dice-toggle" title="${t('tooltip.diceDraggable')}">
+                <i class="fa-solid fa-dice-d20"></i>
+            </div>
+            <div class="horae-rpg-dice-body" style="display:none;">
+                <div class="horae-rpg-dice-types">${btns}</div>
+                <div class="horae-rpg-dice-config">
+                    <label>${t('ui.diceCount')}<input type="number" id="horae-dice-count" value="1" min="1" max="20" class="horae-rpg-dice-input"></label>
+                    <label>${t('ui.diceMod')}<input type="number" id="horae-dice-mod" value="0" min="-99" max="99" class="horae-rpg-dice-input"></label>
+                </div>
+                <div class="horae-rpg-dice-result" id="horae-dice-result"></div>
+                <button id="horae-dice-inject" class="horae-rpg-dice-inject" style="display:none;">
+                    <i class="fa-solid fa-paper-plane"></i> ${t('ui.diceInject')}
+                </button>
+            </div>
+        </div>
+    `;
+
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html.trim();
+    document.body.appendChild(wrapper.firstChild);
+
+    const panel = document.getElementById('horae-rpg-dice-panel');
+    if (!panel) return;
+
+    _applyDicePos(panel);
+
+    let lastResult = null;
+    let selectedFaces = 20;
+
+    // ---- 拖拽逻辑（mouse + touch 双端通用） ----
+    const toggle = panel.querySelector('.horae-rpg-dice-toggle');
+    let dragging = false, dragMoved = false, startX = 0, startY = 0, origLeft = 0, origTop = 0;
+
+    function onDragStart(e) {
+        const ev = e.touches ? e.touches[0] : e;
+        dragging = true; dragMoved = false;
+        startX = ev.clientX; startY = ev.clientY;
+        const rect = panel.getBoundingClientRect();
+        origLeft = rect.left; origTop = rect.top;
+        panel.style.transition = 'none';
+    }
+    function onDragMove(e) {
+        if (!dragging) return;
+        const ev = e.touches ? e.touches[0] : e;
+        const dx = ev.clientX - startX, dy = ev.clientY - startY;
+        if (!dragMoved && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) {
+            dragMoved = true;
+            // 首次移动时移除居中 transform，切换为绝对像素定位
+            if (!panel.classList.contains('horae-dice-placed')) {
+                panel.style.left = origLeft + 'px';
+                panel.style.top = origTop + 'px';
+                panel.classList.add('horae-dice-placed');
+            }
+        }
+        if (!dragMoved) return;
+        e.preventDefault();
+        let nx = origLeft + dx, ny = origTop + dy;
+        const vw = window.innerWidth, vh = window.innerHeight;
+        nx = Math.max(0, Math.min(nx, vw - 48));
+        ny = Math.max(0, Math.min(ny, vh - 48));
+        panel.style.left = nx + 'px';
+        panel.style.top = ny + 'px';
+    }
+    function onDragEnd() {
+        if (!dragging) return;
+        dragging = false;
+        panel.style.transition = '';
+        if (dragMoved) {
+            panel.classList.add('horae-dice-placed');
+            settings.dicePosX = parseInt(panel.style.left);
+            settings.dicePosY = parseInt(panel.style.top);
+            panel.classList.toggle('horae-dice-flip-down', settings.dicePosY < 300);
+            saveSettings();
+        }
+    }
+    toggle.addEventListener('mousedown', onDragStart, { signal: sig });
+    document.addEventListener('mousemove', onDragMove, { signal: sig });
+    document.addEventListener('mouseup', onDragEnd, { signal: sig });
+    toggle.addEventListener('touchstart', onDragStart, { passive: false, signal: sig });
+    document.addEventListener('touchmove', onDragMove, { passive: false, signal: sig });
+    document.addEventListener('touchend', onDragEnd, { signal: sig });
+
+    // 点击展开/收起（仅无拖拽时触发）
+    toggle.addEventListener('click', () => {
+        if (dragMoved) return;
+        const body = panel.querySelector('.horae-rpg-dice-body');
+        body.style.display = body.style.display === 'none' ? '' : 'none';
+    }, { signal: sig });
+
+    panel.querySelectorAll('.horae-rpg-dice-btn').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.faces) === selectedFaces);
+        btn.addEventListener('click', () => {
+            selectedFaces = parseInt(btn.dataset.faces);
+            panel.querySelectorAll('.horae-rpg-dice-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            const count = parseInt(document.getElementById('horae-dice-count')?.value) || 1;
+            const mod = parseInt(document.getElementById('horae-dice-mod')?.value) || 0;
+            lastResult = rollDice(count, selectedFaces, mod);
+            const resultEl = document.getElementById('horae-dice-result');
+            if (resultEl) resultEl.textContent = lastResult.display;
+            const injectBtn = document.getElementById('horae-dice-inject');
+            if (injectBtn) injectBtn.style.display = '';
+        }, { signal: sig });
+    });
+
+    document.getElementById('horae-dice-inject')?.addEventListener('click', () => {
+        if (lastResult) {
+            injectDiceToChat(lastResult.display);
+            showToast(t('toast.diceInjected'), 'success');
+        }
+    }, { signal: sig });
+}
+
+/** 应用骰子面板保存的位置；坐标超出当前视口则自动重置 */
+function _applyDicePos(panel) {
+    if (settings.dicePosX != null && settings.dicePosY != null) {
+        const vw = window.innerWidth, vh = window.innerHeight;
+        if (settings.dicePosX > vw || settings.dicePosY > vh) {
+            settings.dicePosX = null;
+            settings.dicePosY = null;
+            return;
+        }
+        const x = Math.max(0, Math.min(settings.dicePosX, vw - 48));
+        const y = Math.max(0, Math.min(settings.dicePosY, vh - 48));
+        panel.style.left = x + 'px';
+        panel.style.top = y + 'px';
+        panel.classList.add('horae-dice-placed');
+        panel.classList.toggle('horae-dice-flip-down', y < 300);
+    }
+}
+
+/** 渲染属性条配置列表 */
+function renderBarConfig() {
+    const list = document.getElementById('horae-rpg-bar-config-list');
+    if (!list) return;
+    const bars = settings.rpgBarConfig || [];
+    list.innerHTML = bars.map((b, i) => `
+        <div class="horae-rpg-config-row" data-idx="${i}">
+            <input class="horae-rpg-config-key" value="${escapeHtml(b.key)}" maxlength="10" data-idx="${i}" />
+            <input class="horae-rpg-config-name" value="${escapeHtml(b.name)}" maxlength="8" data-idx="${i}" />
+            <input type="color" class="horae-rpg-config-color" value="${b.color}" data-idx="${i}" />
+            <button class="horae-rpg-config-del" data-idx="${i}" title="${t('common.delete')}"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+    `).join('');
+}
+
+/** 构建角色下拉选项（{{user}} + NPC列表） */
+function buildCharacterOptions() {
+    const userName = getContext().name1 || '{{user}}';
+    let html = `<option value="__user__">${escapeHtml(userName)}</option>`;
+    const state = horaeManager.getLatestState();
+    for (const [name, info] of Object.entries(state.npcs || {})) {
+        const prefix = info._id ? `N${info._id} ` : '';
+        html += `<option value="${escapeHtml(name)}">${escapeHtml(prefix + name)}</option>`;
+    }
+    return html;
+}
+
+/** 在 Canvas 上绘制雷达图（自适应 DPI + 动态尺寸 + 跟随主题色） */
+function drawRadarChart(canvas, values, config, maxVal = 100) {
+    const n = config.length;
+    if (n < 3) return;
+    const dpr = window.devicePixelRatio || 1;
+
+    // 从 CSS 变量读取颜色，自动跟随美化主题
+    const themeRoot = canvas.closest('#horae_drawer') || canvas.closest('.horae-rpg-char-detail-body') || document.getElementById('horae_drawer') || document.body;
+    const cs = getComputedStyle(themeRoot);
+    const radarHex = cs.getPropertyValue('--horae-radar-color').trim() || cs.getPropertyValue('--horae-primary').trim() || '#7c3aed';
+    const labelColor = cs.getPropertyValue('--horae-radar-label').trim() || cs.getPropertyValue('--horae-text').trim() || '#e2e8f0';
+    const gridColor = cs.getPropertyValue('--horae-border').trim() || 'rgba(255,255,255,0.1)';
+    const rr = parseInt(radarHex.slice(1, 3), 16) || 124;
+    const rg = parseInt(radarHex.slice(3, 5), 16) || 58;
+    const rb = parseInt(radarHex.slice(5, 7), 16) || 237;
+
+    // 根据最长属性名动态选字号
+    const maxNameLen = Math.max(...config.map(c => c.name.length));
+    const fontSize = maxNameLen > 3 ? 11 : 12;
+
+    const tmpCtx = canvas.getContext('2d');
+    tmpCtx.font = `${fontSize}px sans-serif`;
+    let maxLabelW = 0;
+    for (const c of config) {
+        const w = tmpCtx.measureText(`${c.name} ${maxVal}`).width;
+        if (w > maxLabelW) maxLabelW = w;
+    }
+
+    // 动态布局：保证侧面标签不超出画布
+    const labelGap = 18;
+    const labelMargin = 4;
+    const pad = Math.max(38, Math.ceil(maxLabelW) + labelGap + labelMargin);
+    const r = 92;
+    const cssW = Math.min(400, 2 * (r + pad));
+    const cssH = cssW;
+    const cx = cssW / 2, cy = cssH / 2;
+    const actualR = Math.min(r, cx - pad);
+
+    canvas.style.width = cssW + 'px';
+    canvas.width = cssW * dpr;
+    canvas.height = cssH * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const angle = i => -Math.PI / 2 + (2 * Math.PI * i) / n;
+
+    // 底层网格
+    ctx.strokeStyle = gridColor;
+    ctx.lineWidth = 1;
+    for (let lv = 1; lv <= 4; lv++) {
+        ctx.beginPath();
+        const lr = (actualR * lv) / 4;
+        for (let i = 0; i <= n; i++) {
+            const a = angle(i % n);
+            const x = cx + lr * Math.cos(a), y = cy + lr * Math.sin(a);
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    }
+    // 辐射线
+    for (let i = 0; i < n; i++) {
+        const a = angle(i);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + actualR * Math.cos(a), cy + actualR * Math.sin(a));
+        ctx.stroke();
+    }
+    // 数据区
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+        const a = angle(i % n);
+        const v = Math.min(maxVal, values[config[i % n].key] || 0);
+        const dr = (v / maxVal) * actualR;
+        const x = cx + dr * Math.cos(a), y = cy + dr * Math.sin(a);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.fillStyle = `rgba(${rr},${rg},${rb},0.25)`;
+    ctx.fill();
+    ctx.strokeStyle = `rgba(${rr},${rg},${rb},0.8)`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // 顶点圆点 + 标签
+    ctx.font = `${fontSize}px sans-serif`;
+    ctx.textAlign = 'center';
+    for (let i = 0; i < n; i++) {
+        const a = angle(i);
+        const v = Math.min(maxVal, values[config[i].key] || 0);
+        const dr = (v / maxVal) * actualR;
+        ctx.beginPath();
+        ctx.arc(cx + dr * Math.cos(a), cy + dr * Math.sin(a), 3, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${rr},${rg},${rb},1)`;
+        ctx.fill();
+        const labelR = actualR + labelGap;
+        const lx = cx + labelR * Math.cos(a);
+        const ly = cy + labelR * Math.sin(a);
+        ctx.fillStyle = labelColor;
+        const cosA = Math.cos(a);
+        ctx.textAlign = cosA < -0.1 ? 'right' : cosA > 0.1 ? 'left' : 'center';
+        ctx.textBaseline = ly < cy - 5 ? 'bottom' : ly > cy + 5 ? 'top' : 'middle';
+        ctx.fillText(`${config[i].name} ${v}`, lx, ly);
+    }
+}
+
+/** 同步 RPG 分页可见性及各子区段显隐 */
+function _syncRpgTabVisibility() {
+    const sendBars = settings.rpgMode && settings.sendRpgBars !== false;
+    const sendAttrs = settings.rpgMode && settings.sendRpgAttributes !== false;
+    const sendSkills = settings.rpgMode && settings.sendRpgSkills !== false;
+    const sendRep = settings.rpgMode && !!settings.sendRpgReputation;
+    const sendEq = settings.rpgMode && !!settings.sendRpgEquipment;
+    const sendLvl = settings.rpgMode && !!settings.sendRpgLevel;
+    const sendCur = settings.rpgMode && !!settings.sendRpgCurrency;
+    const sendSh = settings.rpgMode && !!settings.sendRpgStronghold;
+    const hasContent = sendBars || sendAttrs || sendSkills || sendRep || sendEq || sendLvl || sendCur || sendSh;
+    $('#horae-tab-btn-rpg').toggle(hasContent);
+    $('#horae-rpg-bar-config-area').toggle(sendBars);
+    $('#horae-rpg-attr-config-area').toggle(sendAttrs);
+    $('.horae-rpg-manual-section').toggle(sendAttrs);
+    $('.horae-rpg-skills-area').toggle(sendSkills);
+    $('#horae-rpg-reputation-area').toggle(sendRep);
+    $('#horae-rpg-equipment-area').toggle(sendEq);
+    $('#horae-rpg-level-area').toggle(sendLvl);
+    $('#horae-rpg-currency-area').toggle(sendCur);
+    $('#horae-rpg-stronghold-area').toggle(sendSh);
+}
+
+/** 更新 RPG 分页（角色卡模式，按当前消息位置快照） */
+function updateRpgDisplay() {
+    if (!settings.rpgMode) return;
+    const rpg = horaeManager.getRpgStateAt(0);
+    const state = horaeManager.getLatestState();
+    const container = document.getElementById('horae-tab-rpg');
+    if (!container) return;
+
+    const sendBars = settings.sendRpgBars !== false;
+    const sendAttrs = settings.sendRpgAttributes !== false;
+    const sendSkills = settings.sendRpgSkills !== false;
+    const sendEq = !!settings.sendRpgEquipment;
+    const sendRep = !!settings.sendRpgReputation;
+    const sendLvl = !!settings.sendRpgLevel;
+    const sendCur = !!settings.sendRpgCurrency;
+    const sendSh = !!settings.sendRpgStronghold;
+    const attrCfg = settings.rpgAttributeConfig || [];
+    const hasAttrModule = sendAttrs && attrCfg.length > 0;
+    const detailModules = [hasAttrModule, sendSkills, sendEq, sendRep, sendCur, sendSh].filter(Boolean).length;
+    const moduleCount = [sendBars, hasAttrModule, sendSkills, sendEq, sendRep, sendLvl, sendCur, sendSh].filter(Boolean).length;
+    const useCardLayout = detailModules >= 1 || moduleCount >= 2;
+
+    // 配置区始终渲染
+    renderBarConfig();
+    renderAttrConfig();
+    if (sendRep) {
+        renderReputationConfig();
+        renderReputationValues();
+    }
+    if (sendEq) {
+        renderEquipmentValues();
+        _bindEquipmentEvents();
+    }
+    if (sendCur) renderCurrencyConfig();
+    if (sendLvl) renderLevelValues();
+    if (sendSh) { renderStrongholdTree(); _bindStrongholdEvents(); }
+
+    const barsSection = document.getElementById('horae-rpg-bars-section');
+    const charCardsSection = document.getElementById('horae-rpg-char-cards');
+    if (!barsSection || !charCardsSection) return;
+
+    // 收集所有角色
+    const allNames = new Set([
+        ...Object.keys(rpg.bars || {}),
+        ...Object.keys(rpg.status || {}),
+        ...Object.keys(rpg.skills || {}),
+        ...Object.keys(rpg.attributes || {}),
+        ...Object.keys(rpg.reputation || {}),
+        ...Object.keys(rpg.equipment || {}),
+        ...Object.keys(rpg.levels || {}),
+        ...Object.keys(rpg.xp || {}),
+        ...Object.keys(rpg.currency || {}),
+    ]);
+
+    const _uoUserName = getContext().name1 || '';
+
+    /** 构建单个角色的分页标签 HTML */
+    function _buildCharTabs(name) {
+        const tabs = [];
+        const panels = [];
+        const eid = name.replace(/[^a-zA-Z0-9]/g, '_');
+        const _isU = (name === _uoUserName);
+        const attrs = rpg.attributes?.[name] || {};
+        const skills = rpg.skills?.[name] || [];
+        const charEq = rpg.equipment?.[name] || {};
+        const charRep = rpg.reputation?.[name] || {};
+        const charCur = rpg.currency?.[name] || {};
+        const charLv = rpg.levels?.[name];
+        const charXp = rpg.xp?.[name];
+
+        if (hasAttrModule && (!settings.rpgAttrsUserOnly || _isU)) {
+            tabs.push({ id: `attr_${eid}`, label: t('ui.rpgTabAttr') });
+            const hasAttrs = Object.keys(attrs).length > 0;
+            const viewMode = settings.rpgAttrViewMode || 'radar';
+            let html = '<div class="horae-rpg-attr-section">';
+            html += `<div class="horae-rpg-attr-header"><span>${t('label.attributes')}</span><button class="horae-rpg-charattr-edit" data-char="${escapeHtml(name)}" title="${t('tooltip.addEditCharAttr')}"><i class="fa-solid fa-pen-to-square"></i></button></div>`;
+            if (hasAttrs) {
+                if (viewMode === 'radar') {
+                    html += `<canvas class="horae-rpg-radar" data-char="${escapeHtml(name)}"></canvas>`;
+                } else {
+                    html += '<div class="horae-rpg-attr-text">';
+                    for (const a of attrCfg) html += `<div class="horae-rpg-attr-row"><span>${escapeHtml(a.name)}</span><span>${attrs[a.key] ?? '?'}</span></div>`;
+                    html += '</div>';
+                }
+            } else {
+                html += `<div class="horae-rpg-skills-empty">${t('characters.noRecords')}</div>`;
+            }
+            html += '</div>';
+            panels.push(html);
+        }
+        if (sendSkills && (!settings.rpgSkillsUserOnly || _isU)) {
+            tabs.push({ id: `skill_${eid}`, label: t('ui.rpgTabSkill') });
+            let html = '';
+            if (skills.length > 0) {
+                html += '<div class="horae-rpg-card-skills">';
+                for (const sk of skills) {
+                    html += `<details class="horae-rpg-skill-detail"><summary class="horae-rpg-skill-summary">${escapeHtml(sk.name)}`;
+                    if (sk.level) html += ` <span class="horae-rpg-skill-lv">${escapeHtml(sk.level)}</span>`;
+                    html += `<button class="horae-rpg-skill-del" data-owner="${escapeHtml(name)}" data-skill="${escapeHtml(sk.name)}" title="${t('common.delete')}"><i class="fa-solid fa-xmark"></i></button></summary>`;
+                    if (sk.desc) html += `<div class="horae-rpg-skill-desc">${escapeHtml(sk.desc)}</div>`;
+                    html += '</details>';
+                }
+                html += '</div>';
+            } else {
+                html += `<div class="horae-rpg-skills-empty">${t('ui.noSkills')}</div>`;
+            }
+            panels.push(html);
+        }
+        if (sendEq && (!settings.rpgEquipmentUserOnly || _isU)) {
+            tabs.push({ id: `eq_${eid}`, label: t('ui.rpgTabEquip') });
+            let html = '';
+            const slotEntries = Object.entries(charEq);
+            if (slotEntries.length > 0) {
+                html += '<div class="horae-rpg-card-eq">';
+                for (const [slotName, items] of slotEntries) {
+                    for (const item of items) {
+                        const attrStr = Object.entries(item.attrs || {}).map(([k, v]) => `${k}${v >= 0 ? '+' : ''}${v}`).join(', ');
+                        html += `<div class="horae-rpg-card-eq-item"><span class="horae-rpg-card-eq-slot">[${escapeHtml(slotName)}]</span> ${escapeHtml(item.name)}`;
+                        if (attrStr) html += ` <span class="horae-rpg-card-eq-attrs">(${attrStr})</span>`;
+                        html += '</div>';
+                    }
+                }
+                html += '</div>';
+            } else {
+                html += `<div class="horae-rpg-skills-empty">${t('ui.noEquipment')}</div>`;
+            }
+            panels.push(html);
+        }
+        if (sendRep && (!settings.rpgReputationUserOnly || _isU)) {
+            tabs.push({ id: `rep_${eid}`, label: t('ui.rpgTabReputation') });
+            let html = '';
+            const catEntries = Object.entries(charRep);
+            if (catEntries.length > 0) {
+                html += '<div class="horae-rpg-card-rep">';
+                for (const [catName, data] of catEntries) {
+                    html += `<div class="horae-rpg-card-rep-row"><span>${escapeHtml(catName)}</span><span>${data.value}</span></div>`;
+                }
+                html += '</div>';
+            } else {
+                html += `<div class="horae-rpg-skills-empty">${t('ui.noReputationData')}</div>`;
+            }
+            panels.push(html);
+        }
+        // 等级/XP 现在直接显示在状态条上方，不再作为独立标签
+        if (sendCur && (!settings.rpgCurrencyUserOnly || _isU)) {
+            tabs.push({ id: `cur_${eid}`, label: t('ui.rpgTabCurrency') });
+            const denomConfig = rpg.currencyConfig?.denominations || [];
+            let html = '<div class="horae-rpg-card-cur">';
+            const hasCur = denomConfig.some(d => charCur[d.name] != null);
+            if (hasCur) {
+                for (const d of denomConfig) {
+                    const val = charCur[d.name] ?? 0;
+                    const emojiStr = d.emoji ? `${d.emoji} ` : '';
+                    html += `<div class="horae-rpg-card-cur-row"><span>${emojiStr}${escapeHtml(d.name)}</span><span>${val}</span></div>`;
+                }
+            } else {
+                html += `<div class="horae-rpg-skills-empty">${t('ui.noCurrencyData')}</div>`;
+            }
+            html += '</div>';
+            panels.push(html);
+        }
+        if (tabs.length === 0) return '';
+        let html = '<div class="horae-rpg-card-tabs" data-char="' + escapeHtml(name) + '">';
+        html += '<div class="horae-rpg-card-tab-bar">';
+        for (let i = 0; i < tabs.length; i++) {
+            html += `<button class="horae-rpg-card-tab-btn${i === 0 ? ' active' : ''}" data-idx="${i}">${tabs[i].label}</button>`;
+        }
+        html += '</div>';
+        for (let i = 0; i < panels.length; i++) {
+            html += `<div class="horae-rpg-card-tab-panel${i === 0 ? ' active' : ''}" data-idx="${i}">${panels[i]}</div>`;
+        }
+        html += '</div>';
+        return html;
+    }
+
+    if (useCardLayout) {
+        barsSection.style.display = '';
+        const presentChars = new Set((state.scene?.characters_present || []).map(n => n.trim()).filter(Boolean));
+        const userName = getContext().name1 || '';
+        const inScene = [], offScene = [];
+        for (const name of allNames) {
+            let isInScene = presentChars.has(name);
+            if (!isInScene && name === userName) {
+                for (const p of presentChars) {
+                    if (p.includes(name) || name.includes(p)) { isInScene = true; break; }
+                }
+            }
+            if (!isInScene) {
+                for (const p of presentChars) {
+                    if (p.includes(name) || name.includes(p)) { isInScene = true; break; }
+                }
+            }
+            (isInScene ? inScene : offScene).push(name);
+        }
+        const sortedNames = [...inScene, ...offScene];
+
+        let barsHtml = '';
+        for (const name of sortedNames) {
+            const bars = rpg.bars[name];
+            const effects = rpg.status?.[name] || [];
+            const npc = state.npcs[name];
+            const profession = npc?.personality?.split(/[,，]/)?.[0]?.trim() || '';
+            const isPresent = inScene.includes(name);
+            const charLv = rpg.levels?.[name];
+
+            if (!isPresent) continue;
+            const _isUser = (name === userName);
+            barsHtml += '<div class="horae-rpg-char-block">';
+
+            if (sendBars && (!settings.rpgBarsUserOnly || _isUser)) {
+                barsHtml += '<div class="horae-rpg-char-card horae-rpg-bar-card">';
+                // 角色名行: 名称 + 等级 + 状态图标 ...... 货币（右端）
+                barsHtml += '<div class="horae-rpg-bar-card-header">';
+                barsHtml += `<span class="horae-rpg-char-name">${escapeHtml(name)}</span>`;
+                if (sendLvl && charLv != null && (!settings.rpgLevelUserOnly || _isUser)) barsHtml += `<span class="horae-rpg-lv-badge">Lv.${charLv}</span>`;
+                for (const e of effects) {
+                    barsHtml += `<i class="fa-solid ${getStatusIcon(e)} horae-rpg-hud-effect" title="${escapeHtml(e)}"></i>`;
+                }
+                let curRightHtml = '';
+                const charCurTop = rpg.currency?.[name] || {};
+                const denomCfgTop = rpg.currencyConfig?.denominations || [];
+                if (sendCur && (!settings.rpgCurrencyUserOnly || _isUser) && denomCfgTop.length > 0) {
+                    for (const d of denomCfgTop) {
+                        const v = charCurTop[d.name];
+                        if (v != null) curRightHtml += `<span class="horae-rpg-hud-cur-tag">${d.emoji || '💰'}${v}</span>`;
+                    }
+                }
+                if (curRightHtml) barsHtml += `<span class="horae-rpg-bar-card-right">${curRightHtml}</span>`;
+                barsHtml += '</div>';
+                // XP 条
+                const charXpTop = rpg.xp?.[name];
+                if (sendLvl && (!settings.rpgLevelUserOnly || _isUser) && charXpTop && charXpTop[1] > 0) {
+                    const xpPct = Math.min(100, Math.round(charXpTop[0] / charXpTop[1] * 100));
+                    barsHtml += `<div class="horae-rpg-bar"><span class="horae-rpg-bar-label">XP</span><div class="horae-rpg-bar-track"><div class="horae-rpg-bar-fill" style="width:${xpPct}%;background:#a78bfa;"></div></div><span class="horae-rpg-bar-val">${charXpTop[0]}/${charXpTop[1]}</span></div>`;
+                }
+                if (bars) {
+                    for (const [type, val] of Object.entries(bars)) {
+                        const label = getRpgBarName(type, val[2]);
+                        const cur = val[0], max = val[1];
+                        const pct = max > 0 ? Math.min(100, Math.round(cur / max * 100)) : 0;
+                        const color = getRpgBarColor(type);
+                        barsHtml += `<div class="horae-rpg-bar"><span class="horae-rpg-bar-label">${escapeHtml(label)}</span><div class="horae-rpg-bar-track"><div class="horae-rpg-bar-fill" style="width:${pct}%;background:${color};"></div></div><span class="horae-rpg-bar-val">${cur}/${max}</span></div>`;
+                    }
+                }
+                if (effects.length > 0) {
+                    barsHtml += `<div class="horae-rpg-status-label">${t('ui.statusList')}</div><div class="horae-rpg-status-detail">`;
+                    for (const e of effects) barsHtml += `<div class="horae-rpg-status-item"><i class="fa-solid ${getStatusIcon(e)} horae-rpg-status-icon"></i><span>${escapeHtml(e)}</span></div>`;
+                    barsHtml += '</div>';
+                }
+                barsHtml += '</div>';
+            }
+
+            const tabContent = _buildCharTabs(name);
+            if (tabContent) {
+                barsHtml += `<details class="horae-rpg-char-detail"><summary class="horae-rpg-char-summary"><span class="horae-rpg-char-detail-name">${escapeHtml(name)}</span>`;
+                if (sendLvl && (!settings.rpgLevelUserOnly || _isUser) && rpg.levels?.[name] != null) barsHtml += `<span class="horae-rpg-lv-badge">Lv.${rpg.levels[name]}</span>`;
+                if (profession) barsHtml += `<span class="horae-rpg-char-prof">${escapeHtml(profession)}</span>`;
+                barsHtml += `</summary><div class="horae-rpg-char-detail-body">${tabContent}</div></details>`;
+            }
+            barsHtml += '</div>';
+        }
+        barsSection.innerHTML = barsHtml;
+        charCardsSection.innerHTML = '';
+        charCardsSection.style.display = 'none';
+
+        // 分页标签点击事件
+        barsSection.querySelectorAll('.horae-rpg-card-tab-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const tabs = this.closest('.horae-rpg-card-tabs');
+                const idx = this.dataset.idx;
+                tabs.querySelectorAll('.horae-rpg-card-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.idx === idx));
+                tabs.querySelectorAll('.horae-rpg-card-tab-panel').forEach(p => p.classList.toggle('active', p.dataset.idx === idx));
+            });
+        });
+    } else {
+        charCardsSection.innerHTML = '';
+        charCardsSection.style.display = 'none';
+        let barsHtml = '';
+        for (const name of allNames) {
+            if (settings.rpgBarsUserOnly && name !== userName) continue;
+            const bars = rpg.bars[name] || {};
+            const effects = rpg.status?.[name] || [];
+            if (!Object.keys(bars).length && !effects.length) continue;
+            let h = `<div class="horae-rpg-char-card"><div class="horae-rpg-char-name">${escapeHtml(name)}</div>`;
+            for (const [type, val] of Object.entries(bars)) {
+                const label = getRpgBarName(type, val[2]);
+                const cur = val[0], max = val[1];
+                const pct = max > 0 ? Math.min(100, Math.round(cur / max * 100)) : 0;
+                const color = getRpgBarColor(type);
+                h += `<div class="horae-rpg-bar"><span class="horae-rpg-bar-label">${escapeHtml(label)}</span><div class="horae-rpg-bar-track"><div class="horae-rpg-bar-fill" style="width:${pct}%;background:${color};"></div></div><span class="horae-rpg-bar-val">${cur}/${max}</span></div>`;
+            }
+            if (effects.length > 0) {
+                h += `<div class="horae-rpg-status-label">${t('ui.statusList')}</div><div class="horae-rpg-status-detail">`;
+                for (const e of effects) h += `<div class="horae-rpg-status-item"><i class="fa-solid ${getStatusIcon(e)} horae-rpg-status-icon"></i><span>${escapeHtml(e)}</span></div>`;
+                h += '</div>';
+            }
+            h += '</div>';
+            barsHtml += h;
+        }
+        barsSection.innerHTML = barsHtml;
+    }
+
+    // 技能平铺列表：角色卡模式下隐藏
+    const skillsSection = document.getElementById('horae-rpg-skills-section');
+    if (skillsSection) {
+        if (useCardLayout && sendSkills) {
+            skillsSection.innerHTML = `<div class="horae-rpg-skills-empty">${t('ui.skillsInCard')}</div>`;
+        } else {
+            const hasSkills = Object.values(rpg.skills).some(arr => arr?.length > 0);
+            let skillsHtml = '';
+            if (hasSkills) {
+                for (const [name, skills] of Object.entries(rpg.skills)) {
+                    if (!skills?.length) continue;
+                    if (settings.rpgSkillsUserOnly && name !== userName) continue;
+                    skillsHtml += `<div class="horae-rpg-skill-group"><div class="horae-rpg-char-name">${escapeHtml(name)}</div>`;
+                    for (const sk of skills) {
+                        const lv = sk.level ? `<span class="horae-rpg-skill-lv">${escapeHtml(sk.level)}</span>` : '';
+                        const desc = sk.desc ? `<div class="horae-rpg-skill-desc">${escapeHtml(sk.desc)}</div>` : '';
+                        skillsHtml += `<div class="horae-rpg-skill-card"><div class="horae-rpg-skill-header"><span class="horae-rpg-skill-name">${escapeHtml(sk.name)}</span>${lv}<button class="horae-rpg-skill-del" data-owner="${escapeHtml(name)}" data-skill="${escapeHtml(sk.name)}" title="${t('common.delete')}"><i class="fa-solid fa-xmark"></i></button></div>${desc}</div>`;
+                    }
+                    skillsHtml += '</div>';
+                }
+            } else {
+                skillsHtml = `<div class="horae-rpg-skills-empty">${t('ui.noSkillsAddManually')}</div>`;
+            }
+            skillsSection.innerHTML = skillsHtml;
+        }
+    }
+
+    // 绘制雷达图
+    document.querySelectorAll('.horae-rpg-radar').forEach(canvas => {
+        const charName = canvas.dataset.char;
+        const vals = rpg.attributes?.[charName] || {};
+        drawRadarChart(canvas, vals, attrCfg);
+    });
+
+    updateAllRpgHuds();
+}
+
+/** 渲染属性面板配置列表 */
+function renderAttrConfig() {
+    const list = document.getElementById('horae-rpg-attr-config-list');
+    if (!list) return;
+    const attrs = settings.rpgAttributeConfig || [];
+    list.innerHTML = attrs.map((a, i) => `
+        <div class="horae-rpg-config-row" data-idx="${i}">
+            <input class="horae-rpg-config-key" value="${escapeHtml(a.key)}" maxlength="10" data-idx="${i}" data-type="attr" />
+            <input class="horae-rpg-config-name" value="${escapeHtml(a.name)}" maxlength="8" data-idx="${i}" data-type="attr" />
+            <input class="horae-rpg-attr-desc" value="${escapeHtml(a.desc || '')}" placeholder="${t('label.description')}" data-idx="${i}" />
+            <button class="horae-rpg-attr-del" data-idx="${i}" title="${t('common.delete')}"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+    `).join('');
+}
+
+// ============================================
+// 声望系统 UI
+// ============================================
+
+/** 获取 _rpgConfigs 权威存储（顶层键，独立于 rpg 对象，不受 rebuild 影响） */
+function _ensureRpgConfigs() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return null;
+    if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
+    if (!chat[0].horae_meta._rpgConfigs) {
+        chat[0].horae_meta._rpgConfigs = {};
+    }
+    return chat[0].horae_meta._rpgConfigs;
+}
+
+/** 将 _rpgConfigs 同步到 rpg 对象上（供 _mergeRpgData 等内部函数使用） */
+function _syncConfigsToRpg() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return;
+    const meta = chat[0].horae_meta;
+    if (!meta?._rpgConfigs) return;
+    if (!meta.rpg) meta.rpg = {};
+    const c = meta._rpgConfigs;
+    if (c.reputationConfig) meta.rpg.reputationConfig = c.reputationConfig;
+    if (c.equipmentConfig) meta.rpg.equipmentConfig = c.equipmentConfig;
+    if (c.currencyConfig) meta.rpg.currencyConfig = c.currencyConfig;
+    if (c._deletedSkills) meta.rpg._deletedSkills = c._deletedSkills;
+    if (c._deletedStrongholds) meta.rpg._deletedStrongholds = c._deletedStrongholds;
+}
+
+function _getRepConfig() {
+    const c = _ensureRpgConfigs();
+    if (!c) return { categories: [], _deletedCategories: [] };
+    if (!c.reputationConfig) {
+        // 迁移：从 rpg 内部读旧数据
+        const chat = horaeManager.getChat();
+        const oldCfg = chat[0]?.horae_meta?.rpg?.reputationConfig;
+        c.reputationConfig = oldCfg && oldCfg.categories?.length
+            ? oldCfg
+            : { categories: [], _deletedCategories: [] };
+    }
+    return c.reputationConfig;
+}
+
+function _getRepValues() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return {};
+    if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
+    if (!chat[0].horae_meta.rpg) chat[0].horae_meta.rpg = {};
+    if (!chat[0].horae_meta.rpg.reputation) chat[0].horae_meta.rpg.reputation = {};
+    return chat[0].horae_meta.rpg.reputation;
+}
+
+function _saveRepData() {
+    _syncConfigsToRpg();
+    getContext().saveChat();
+}
+
+/** 渲染声望分类配置列表 */
+function renderReputationConfig() {
+    const list = document.getElementById('horae-rpg-rep-config-list');
+    if (!list) return;
+    const config = _getRepConfig();
+    if (!config.categories.length) {
+        list.innerHTML = `<div class="horae-rpg-skills-empty">${t('ui.noReputationCategories')}</div>`;
+        return;
+    }
+    list.innerHTML = config.categories.map((cat, i) => `
+        <div class="horae-rpg-config-row" data-idx="${i}">
+            <input class="horae-rpg-rep-name" value="${escapeHtml(cat.name)}" placeholder="${t('placeholder.reputationName')}" data-idx="${i}" />
+            <input class="horae-rpg-rep-range" value="${cat.min}" type="number" style="width:48px" title="${t('label.minValue')}" data-idx="${i}" data-field="min" />
+            <span style="opacity:.5">~</span>
+            <input class="horae-rpg-rep-range" value="${cat.max}" type="number" style="width:48px" title="${t('label.maxValue')}" data-idx="${i}" data-field="max" />
+            <button class="horae-rpg-btn-sm horae-rpg-rep-subitems" data-idx="${i}" title="${t('tooltip.editSubitems')}"><i class="fa-solid fa-list-ul"></i></button>
+            <button class="horae-rpg-rep-del" data-idx="${i}" title="${t('common.delete')}"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+    `).join('');
+}
+
+/** 渲染声望数值（每个角色的声望列表） */
+function renderReputationValues() {
+    const section = document.getElementById('horae-rpg-rep-values-section');
+    if (!section) return;
+    const config = _getRepConfig();
+    const repValues = _getRepValues();
+    if (!config.categories.length) { section.innerHTML = ''; return; }
+
+    const allOwners = new Set(Object.keys(repValues));
+    const rpg = horaeManager.getRpgStateAt(0);
+    for (const name of Object.keys(rpg.bars || {})) allOwners.add(name);
+
+    const _repUO = !!settings.rpgReputationUserOnly;
+    const _userName = getContext().name1 || '';
+
+    if (!allOwners.size) {
+        section.innerHTML = `<div class="horae-rpg-skills-empty">${t('ui.noReputationValues')}</div>`;
+        return;
+    }
+
+    let html = '';
+    for (const owner of allOwners) {
+        if (_repUO && owner !== _userName) continue;
+        const ownerData = repValues[owner] || {};
+        html += `<details class="horae-rpg-char-detail"><summary class="horae-rpg-char-summary"><span class="horae-rpg-char-detail-name">${escapeHtml(owner)} ${t('ui.reputation')}</span></summary><div class="horae-rpg-char-detail-body">`;
+        for (const cat of config.categories) {
+            const data = ownerData[cat.name] || { value: cat.default ?? 0, subItems: {} };
+            const range = (cat.max ?? 100) - (cat.min ?? -100);
+            const offset = data.value - (cat.min ?? -100);
+            const pct = range > 0 ? Math.min(100, Math.round(offset / range * 100)) : 50;
+            const color = data.value >= 0 ? '#22c55e' : '#ef4444';
+            html += `<div class="horae-rpg-bar">
+                <span class="horae-rpg-bar-label">${escapeHtml(cat.name)}</span>
+                <div class="horae-rpg-bar-track"><div class="horae-rpg-bar-fill" style="width:${pct}%;background:${color};"></div></div>
+                <span class="horae-rpg-bar-val horae-rpg-rep-val-edit" data-owner="${escapeHtml(owner)}" data-cat="${escapeHtml(cat.name)}" title="${t('common.edit')}">${data.value}</span>
+            </div>`;
+            if (Object.keys(data.subItems || {}).length > 0) {
+                html += '<div style="padding-left:16px;opacity:.8;font-size:.85em;">';
+                for (const [subName, subVal] of Object.entries(data.subItems)) {
+                    html += `<div>${escapeHtml(subName)}: ${subVal}</div>`;
+                }
+                html += '</div>';
+            }
+        }
+        html += '</div></details>';
+    }
+    section.innerHTML = html;
+}
+
+
+/** 弹出编辑声望分类细项的对话框 */
+function _openRepSubItemsDialog(catIndex) {
+    const config = _getRepConfig();
+    const cat = config.categories[catIndex];
+    if (!cat) return;
+    const subItems = (cat.subItems || []).slice();
+    const modal = document.createElement('div');
+    modal.className = 'horae-modal';
+    modal.innerHTML = `
+        <div class="horae-modal-content" style="max-width:400px;width:92vw;box-sizing:border-box;">
+            <div class="horae-modal-header"><h3>${t('ui.reputationSubitemTitle', {name: escapeHtml(cat.name)})}</h3></div>
+            <div class="horae-modal-body">
+                <p style="margin-bottom:8px;opacity:.7;font-size:.9em;">${t('ui.reputationSubitemHint')}</p>
+                <div id="horae-rep-subitems-list"></div>
+                <button id="horae-rep-subitems-add" class="horae-btn-add-rep-subitem"><i class="fa-solid fa-plus"></i> ${t('ui.addSubitem')}</button>
+            </div>
+            <div class="horae-modal-footer">
+                <button id="horae-rep-subitems-ok" class="horae-btn primary">${t('common.confirm')}</button>
+                <button id="horae-rep-subitems-cancel" class="horae-btn">${t('common.cancel')}</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    preventModalBubble(modal);
+
+    function renderList() {
+        const list = modal.querySelector('#horae-rep-subitems-list');
+        list.innerHTML = subItems.map((s, i) => `
+            <div style="display:flex;gap:4px;margin-bottom:4px;align-items:center;">
+                <input class="horae-rpg-rep-subitem-input" value="${escapeHtml(s)}" data-idx="${i}" style="flex:1;" placeholder="${t('placeholder.subitemName')}" />
+                <button class="horae-rpg-rep-subitem-del" data-idx="${i}" title="${t('common.delete')}"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+        `).join('');
+    }
+    renderList();
+
+    modal.querySelector('#horae-rep-subitems-add').onclick = () => { subItems.push(''); renderList(); };
+    modal.addEventListener('click', e => {
+        if (e.target.closest('.horae-rpg-rep-subitem-del')) {
+            const idx = parseInt(e.target.closest('.horae-rpg-rep-subitem-del').dataset.idx);
+            subItems.splice(idx, 1);
+            renderList();
+        }
+    });
+    modal.addEventListener('input', e => {
+        if (e.target.matches('.horae-rpg-rep-subitem-input')) {
+            subItems[parseInt(e.target.dataset.idx)] = e.target.value.trim();
+        }
+    });
+    modal.querySelector('#horae-rep-subitems-ok').onclick = () => {
+        cat.subItems = subItems.filter(s => s);
+        _saveRepData();
+        modal.remove();
+        renderReputationConfig();
+    };
+    modal.querySelector('#horae-rep-subitems-cancel').onclick = () => modal.remove();
+}
+
+/** 声望分类配置事件绑定 */
+function _bindReputationConfigEvents() {
+    const container = document.getElementById('horae-tab-rpg');
+    if (!container) return;
+
+    // 添加声望分类
+    $('#horae-rpg-rep-add').off('click').on('click', () => {
+        const config = _getRepConfig();
+        config.categories.push({ name: t('ui.newReputation'), min: -100, max: 100, default: 0, subItems: [] });
+        _saveRepData();
+        renderReputationConfig();
+        renderReputationValues();
+    });
+
+    // 名称/范围编辑
+    $(container).off('input.repconfig').on('input.repconfig', '.horae-rpg-rep-name, .horae-rpg-rep-range', function() {
+        const idx = parseInt(this.dataset.idx);
+        const config = _getRepConfig();
+        const cat = config.categories[idx];
+        if (!cat) return;
+        if (this.classList.contains('horae-rpg-rep-name')) {
+            cat.name = this.value.trim();
+        } else {
+            const field = this.dataset.field;
+            cat[field] = parseInt(this.value) || 0;
+        }
+        _saveRepData();
+    });
+
+    // 细项编辑按钮
+    $(container).off('click.repsubitems').on('click.repsubitems', '.horae-rpg-rep-subitems', function() {
+        _openRepSubItemsDialog(parseInt(this.dataset.idx));
+    });
+
+    // 删除声望分类
+    $(container).off('click.repdel').on('click.repdel', '.horae-rpg-rep-del', function() {
+        if (!confirm(t('confirm.deleteTable'))) return;
+        const idx = parseInt(this.dataset.idx);
+        const config = _getRepConfig();
+        const deleted = config.categories.splice(idx, 1)[0];
+        if (deleted?.name) {
+            if (!config._deletedCategories) config._deletedCategories = [];
+            config._deletedCategories.push(deleted.name);
+            // 清除所有角色该分类的数值
+            const repValues = _getRepValues();
+            for (const owner of Object.keys(repValues)) {
+                delete repValues[owner][deleted.name];
+                if (!Object.keys(repValues[owner]).length) delete repValues[owner];
+            }
+        }
+        _saveRepData();
+        renderReputationConfig();
+        renderReputationValues();
+    });
+
+    // 手动编辑声望数值
+    $(container).off('click.repvaledit').on('click.repvaledit', '.horae-rpg-rep-val-edit', function() {
+        const owner = this.dataset.owner;
+        const catName = this.dataset.cat;
+        const config = _getRepConfig();
+        const cat = config.categories.find(c => c.name === catName);
+        if (!cat) return;
+        const repValues = _getRepValues();
+        if (!repValues[owner]) repValues[owner] = {};
+        if (!repValues[owner][catName]) repValues[owner][catName] = { value: cat.default ?? 0, subItems: {} };
+        const current = repValues[owner][catName].value;
+        const newVal = prompt(t('toast.reputationPrompt', {owner, cat: catName, min: cat.min ?? -100, max: cat.max ?? 100}), current);
+        if (newVal === null) return;
+        const parsed = parseInt(newVal);
+        if (isNaN(parsed)) return;
+        repValues[owner][catName].value = Math.max(cat.min ?? -100, Math.min(cat.max ?? 100, parsed));
+        repValues[owner][catName]._userEdited = true;
+        _saveRepData();
+        renderReputationValues();
+    });
+
+    // 导出声望配置
+    $('#horae-rpg-rep-export').off('click').on('click', () => {
+        const config = _getRepConfig();
+        const data = { horae_reputation_config: { version: 1, categories: config.categories } };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'horae-reputation-config.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showToast(t('toast.reputationExported'), 'success');
+    });
+
+    // 导入声望配置
+    $('#horae-rpg-rep-import').off('click').on('click', () => {
+        document.getElementById('horae-rpg-rep-import-file')?.click();
+    });
+    $('#horae-rpg-rep-import-file').off('change').on('change', function() {
+        const file = this.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const data = JSON.parse(e.target.result);
+                const imported = data?.horae_reputation_config;
+                if (!imported?.categories?.length) {
+                    showToast(t('toast.invalidFile'), 'error');
+                    return;
+                }
+                if (!confirm(t('confirm.importReputation', {n: imported.categories.length}))) return;
+                const config = _getRepConfig();
+                const existingNames = new Set(config.categories.map(c => c.name));
+                let added = 0;
+                for (const cat of imported.categories) {
+                    if (existingNames.has(cat.name)) continue;
+                    config.categories.push({
+                        name: cat.name,
+                        min: cat.min ?? -100,
+                        max: cat.max ?? 100,
+                        default: cat.default ?? 0,
+                        subItems: cat.subItems || [],
+                    });
+                    // 从删除黑名单中移除（如果之前删过同名的）
+                    if (config._deletedCategories) {
+                        config._deletedCategories = config._deletedCategories.filter(n => n !== cat.name);
+                    }
+                    added++;
+                }
+                _saveRepData();
+                renderReputationConfig();
+                renderReputationValues();
+                showToast(t('toast.reputationImported', {n: added}), 'success');
+            } catch (err) {
+                showToast(t('toast.importFailed', {error: err.message}), 'error');
+            }
+        };
+        reader.readAsText(file);
+        this.value = '';
+    });
+}
+
+// ============================================
+// 装备栏 UI
+// ============================================
+
+/** 获取装备配置根对象 { locked, perChar: { name: { slots, _deletedSlots } } } */
+function _getEqConfigMap() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return { locked: false, perChar: {} };
+    if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
+    if (!chat[0].horae_meta.rpg) chat[0].horae_meta.rpg = {};
+    const c = _ensureRpgConfigs();
+    // 优先从 _rpgConfigs 读取
+    let cfg = c?.equipmentConfig || chat[0].horae_meta.rpg.equipmentConfig;
+    if (!cfg) {
+        cfg = { locked: false, perChar: {} };
+        if (c) c.equipmentConfig = cfg;
+        chat[0].horae_meta.rpg.equipmentConfig = cfg;
+        return cfg;
+    }
+    // 旧格式迁移：{ slots: [...] } → { perChar: { owner: { slots } } }
+    if (Array.isArray(cfg.slots)) {
+        const oldSlots = cfg.slots;
+        const locked = !!cfg.locked;
+        const oldDeleted = cfg._deletedSlots || [];
+        const eqValues = chat[0].horae_meta.rpg.equipment || {};
+        const perChar = {};
+        for (const owner of Object.keys(eqValues)) {
+            perChar[owner] = { slots: JSON.parse(JSON.stringify(oldSlots)), _deletedSlots: [...oldDeleted] };
+        }
+        cfg = { locked, perChar };
+    }
+    if (!cfg.perChar) cfg.perChar = {};
+    // 同步到两个存储位置
+    if (c) c.equipmentConfig = cfg;
+    chat[0].horae_meta.rpg.equipmentConfig = cfg;
+    return cfg;
+}
+
+/** 获取某角色的装备格位配置 */
+function _getCharEqConfig(owner) {
+    const map = _getEqConfigMap();
+    if (!map.perChar[owner]) map.perChar[owner] = { slots: [], _deletedSlots: [] };
+    return map.perChar[owner];
+}
+
+function _getEqValues() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return {};
+    if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
+    if (!chat[0].horae_meta.rpg) chat[0].horae_meta.rpg = {};
+    if (!chat[0].horae_meta.rpg.equipment) chat[0].horae_meta.rpg.equipment = {};
+    return chat[0].horae_meta.rpg.equipment;
+}
+
+function _saveEqData() {
+    getContext().saveChat();
+}
+
+/** renderEquipmentSlotConfig 已废弃，格位配置合并到角色装备面板 */
+function renderEquipmentSlotConfig() { /* noop - per-char config in renderEquipmentValues */ }
+
+/** 渲染统一装备面板（每角色独立格位 + 装备） */
+function renderEquipmentValues() {
+    const section = document.getElementById('horae-rpg-eq-values-section');
+    if (!section) return;
+    const eqValues = _getEqValues();
+    const cfgMap = _getEqConfigMap();
+    const lockBtn = document.getElementById('horae-rpg-eq-lock');
+    if (lockBtn) {
+        lockBtn.querySelector('i').className = cfgMap.locked ? 'fa-solid fa-lock' : 'fa-solid fa-lock-open';
+        lockBtn.title = cfgMap.locked ? t('ui.equipLocked') : t('ui.equipUnlocked');
+    }
+    const rpg = horaeManager.getRpgStateAt(0);
+    const allOwners = new Set([...Object.keys(eqValues), ...Object.keys(cfgMap.perChar), ...Object.keys(rpg.bars || {})]);
+    const _eqUO = !!settings.rpgEquipmentUserOnly;
+    const _eqUserName = getContext().name1 || '';
+
+    if (!allOwners.size) {
+        section.innerHTML = `<div class="horae-rpg-skills-empty">${t('ui.noEquipCharData')}</div>`;
+        return;
+    }
+
+    let html = '';
+    for (const owner of allOwners) {
+        if (_eqUO && owner !== _eqUserName) continue;
+        const charCfg = _getCharEqConfig(owner);
+        const ownerSlots = eqValues[owner] || {};
+        const deletedSlots = new Set(charCfg._deletedSlots || []);
+        let hasItems = false;
+        let itemsHtml = '';
+        for (const slot of charCfg.slots) {
+            if (deletedSlots.has(slot.name)) continue;
+            const items = ownerSlots[slot.name] || [];
+            if (items.length > 0) hasItems = true;
+            itemsHtml += `<div class="horae-rpg-eq-slot-group"><span class="horae-rpg-eq-slot-label">${escapeHtml(slot.name)} (${items.length}/${slot.maxCount ?? 1})</span>`;
+            if (items.length > 0) {
+                for (const item of items) {
+                    const attrStr = Object.entries(item.attrs || {}).map(([k, v]) => `<span class="horae-rpg-eq-attr">${escapeHtml(k)} ${v >= 0 ? '+' : ''}${v}</span>`).join(' ');
+                    const meta = item._itemMeta || {};
+                    const iconHtml = meta.icon ? `<span class="horae-rpg-eq-item-icon">${meta.icon}</span>` : '';
+                    const descHtml = meta.description ? `<div class="horae-rpg-eq-item-desc">${escapeHtml(meta.description)}</div>` : '';
+                    itemsHtml += `<div class="horae-rpg-eq-item">
+                        <div class="horae-rpg-eq-item-header">
+                            ${iconHtml}<span class="horae-rpg-eq-item-name">${escapeHtml(item.name)}</span> ${attrStr}
+                            <button class="horae-rpg-eq-item-del" data-owner="${escapeHtml(owner)}" data-slot="${escapeHtml(slot.name)}" data-item="${escapeHtml(item.name)}" title="${t('tooltip.unequipReturn')}"><i class="fa-solid fa-arrow-right-from-bracket"></i></button>
+                        </div>
+                        ${descHtml}
+                    </div>`;
+                }
+            } else {
+                itemsHtml += `<div style="opacity:.4;font-size:.85em;padding:2px 0;">${t('ui.emptySlot')}</div>`;
+            }
+            itemsHtml += '</div>';
+        }
+        html += `<details class="horae-rpg-char-detail"${hasItems ? ' open' : ''}>
+            <summary class="horae-rpg-char-summary">
+                <span class="horae-rpg-char-detail-name">${t('ui.equipLabel', {owner: escapeHtml(owner)})}</span>
+                <span style="flex:1;"></span>
+                <button class="horae-rpg-btn-sm horae-rpg-eq-char-tpl" data-owner="${escapeHtml(owner)}" title="${t('tooltip.loadTemplate')}"><i class="fa-solid fa-shapes"></i></button>
+                <button class="horae-rpg-btn-sm horae-rpg-eq-char-add-slot" data-owner="${escapeHtml(owner)}" title="${t('tooltip.addSlot')}"><i class="fa-solid fa-plus"></i></button>
+                <button class="horae-rpg-btn-sm horae-rpg-eq-char-del-slot" data-owner="${escapeHtml(owner)}" title="${t('tooltip.deleteSlot')}"><i class="fa-solid fa-minus"></i></button>
+            </summary>
+            <div class="horae-rpg-char-detail-body">${itemsHtml}
+                <button class="horae-rpg-btn-sm horae-rpg-eq-add-item" data-owner="${escapeHtml(owner)}" style="margin-top:6px;width:100%;"><i class="fa-solid fa-plus"></i> ${t('ui.addEquipManual')}</button>
+            </div>
+        </details>`;
+    }
+    section.innerHTML = html;
+    // 隐藏旧的全局格位列表
+    const oldList = document.getElementById('horae-rpg-eq-slot-list');
+    if (oldList) oldList.innerHTML = '';
+}
+
+/** 手动添加装备对话框 */
+function _openAddEquipDialog(owner) {
+    const charCfg = _getCharEqConfig(owner);
+    if (!charCfg.slots.length) { showToast(t('toast.noSlots', {owner}), 'warning'); return; }
+    const modal = document.createElement('div');
+    modal.className = 'horae-modal';
+    modal.innerHTML = `
+        <div class="horae-modal-content" style="max-width:420px;width:92vw;box-sizing:border-box;">
+            <div class="horae-modal-header"><h3>${t('modal.addEquipment')}</h3></div>
+            <div class="horae-modal-body">
+                <div class="horae-edit-field">
+                    <label>${t('label.slot')}</label>
+                    <select id="horae-eq-add-slot">
+                        ${charCfg.slots.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)} (${s.maxCount ?? 1})</option>`).join('')}
+                    </select>
+                </div>
+                <div class="horae-edit-field">
+                    <label>${t('label.name')}</label>
+                    <input id="horae-eq-add-name" type="text" placeholder="${t('placeholder.equipName')}" />
+                </div>
+                <div class="horae-edit-field">
+                    <label>${t('label.attributes')}</label>
+                    <textarea id="horae-eq-add-attrs" rows="4" placeholder="${t('placeholder.equipAttrs')}"></textarea>
+                </div>
+            </div>
+            <div class="horae-modal-footer">
+                <button id="horae-eq-add-ok" class="horae-btn primary">${t('common.confirm')}</button>
+                <button id="horae-eq-add-cancel" class="horae-btn">${t('common.cancel')}</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    preventModalBubble(modal);
+    modal.querySelector('#horae-eq-add-ok').onclick = () => {
+        const slotName = modal.querySelector('#horae-eq-add-slot').value;
+        const itemName = modal.querySelector('#horae-eq-add-name').value.trim();
+        if (!itemName) { showToast(t('toast.equipNameRequired'), 'warning'); return; }
+        const attrsText = modal.querySelector('#horae-eq-add-attrs').value;
+        const attrs = {};
+        for (const line of attrsText.split('\n')) {
+            const m = line.trim().match(/^(.+?)=(-?\d+)$/);
+            if (m) attrs[m[1].trim()] = parseInt(m[2]);
+        }
+        const eqValues = _getEqValues();
+        if (!eqValues[owner]) eqValues[owner] = {};
+        if (!eqValues[owner][slotName]) eqValues[owner][slotName] = [];
+        const slotCfg = charCfg.slots.find(s => s.name === slotName);
+        const maxCount = slotCfg?.maxCount ?? 1;
+        if (eqValues[owner][slotName].length >= maxCount) {
+            if (!confirm(t('confirm.importEquipment'))) return;
+            const bumped = eqValues[owner][slotName].shift();
+            if (bumped) _unequipToItems(owner, slotName, bumped.name, true);
+        }
+        eqValues[owner][slotName].push({ name: itemName, attrs, _itemMeta: {} });
+        _saveEqData();
+        modal.remove();
+        renderEquipmentValues();
+        _bindEquipmentEvents();
+    };
+    modal.querySelector('#horae-eq-add-cancel').onclick = () => modal.remove();
+}
+
+/** 装备栏事件绑定 */
+function _bindEquipmentEvents() {
+    const container = document.getElementById('horae-tab-rpg');
+    if (!container) return;
+
+    // 为角色加载模板
+    $(container).off('click.eqchartpl').on('click.eqchartpl', '.horae-rpg-eq-char-tpl', function(e) {
+        e.stopPropagation();
+        const owner = this.dataset.owner;
+        const tpls = settings.equipmentTemplates || [];
+        if (!tpls.length) { showToast(t('toast.noTemplates'), 'warning'); return; }
+        const modal = document.createElement('div');
+        modal.className = 'horae-modal';
+        let listHtml = tpls.map((tpl, i) => {
+            const slotsStr = tpl.slots.map(s => s.name).join('、');
+            return `<div class="horae-rpg-tpl-item" data-idx="${i}" style="cursor:pointer;">
+                <div class="horae-rpg-tpl-name">${escapeHtml(tpl.name)}</div>
+                <div class="horae-rpg-tpl-slots">${escapeHtml(slotsStr)}</div>
+            </div>`;
+        }).join('');
+        modal.innerHTML = `
+            <div class="horae-modal-content" style="max-width:400px;width:90vw;box-sizing:border-box;">
+                <div class="horae-modal-header"><h3>${t('modal.selectTemplate', {owner: escapeHtml(owner)})}</h3></div>
+                <div class="horae-modal-body" style="max-height:50vh;overflow-y:auto;">
+                    <div style="margin-bottom:8px;font-size:11px;color:var(--horae-text-muted);">
+                        ${t('ui.templateReplaceHint')}
+                    </div>
+                    ${listHtml}
+                </div>
+                <div class="horae-modal-footer">
+                    <button class="horae-btn primary" id="horae-eq-tpl-save"><i class="fa-solid fa-floppy-disk"></i> ${t('ui.saveAsTemplate')}</button>
+                    <button class="horae-btn" id="horae-eq-tpl-close">${t('common.cancel')}</button>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+        preventModalBubble(modal);
+        modal.querySelector('#horae-eq-tpl-close').onclick = () => modal.remove();
+        modal.querySelector('#horae-eq-tpl-save').onclick = () => {
+            const charCfg = _getCharEqConfig(owner);
+            if (!charCfg.slots.length) { showToast(t('toast.noSlotsToSave', {owner}), 'warning'); return; }
+            const name = prompt(t('label.name') + ':', '');
+            if (!name?.trim()) return;
+            settings.equipmentTemplates.push({
+                name: name.trim(),
+                slots: JSON.parse(JSON.stringify(charCfg.slots.map(s => ({ name: s.name, maxCount: s.maxCount ?? 1 })))),
+            });
+            saveSettingsDebounced();
+            modal.remove();
+            showToast(t('toast.templateSaved', {name: name.trim()}), 'success');
+        };
+        modal.querySelectorAll('.horae-rpg-tpl-item').forEach(item => {
+            item.onclick = () => {
+                const idx = parseInt(item.dataset.idx);
+                const tpl = tpls[idx];
+                if (!tpl) return;
+                const charCfg = _getCharEqConfig(owner);
+                charCfg.slots = JSON.parse(JSON.stringify(tpl.slots));
+                charCfg._deletedSlots = [];
+                charCfg._template = tpl.name;
+                _saveEqData();
+                renderEquipmentValues();
+                _bindEquipmentEvents();
+                horaeManager.init(getContext(), settings);
+                _refreshSystemPromptDisplay();
+                updateTokenCounter();
+                modal.remove();
+                showToast(t('toast.templateLoaded', {owner, name: tpl.name}), 'success');
+            };
+        });
+    });
+
+    // 为角色添加格位
+    $(container).off('click.eqcharaddslot').on('click.eqcharaddslot', '.horae-rpg-eq-char-add-slot', function(e) {
+        e.stopPropagation();
+        const owner = this.dataset.owner;
+        const name = prompt(t('label.name') + ':', '');
+        if (!name?.trim()) return;
+        const maxStr = prompt(t('label.quantity') + ':', '1');
+        const maxCount = Math.max(1, parseInt(maxStr) || 1);
+        const charCfg = _getCharEqConfig(owner);
+        if (charCfg.slots.some(s => s.name === name.trim())) { showToast(t('toast.slotExists'), 'warning'); return; }
+        charCfg.slots.push({ name: name.trim(), maxCount });
+        if (charCfg._deletedSlots) charCfg._deletedSlots = charCfg._deletedSlots.filter(n => n !== name.trim());
+        _saveEqData();
+        renderEquipmentValues();
+        _bindEquipmentEvents();
+        horaeManager.init(getContext(), settings);
+        _refreshSystemPromptDisplay();
+        updateTokenCounter();
+    });
+
+    // 为角色删除格位
+    $(container).off('click.eqchardelslot').on('click.eqchardelslot', '.horae-rpg-eq-char-del-slot', function(e) {
+        e.stopPropagation();
+        const owner = this.dataset.owner;
+        const charCfg = _getCharEqConfig(owner);
+        if (!charCfg.slots.length) { showToast(t('toast.charNoSlots'), 'warning'); return; }
+        const names = charCfg.slots.map(s => s.name);
+        const name = prompt(t('toast.deleteSlotPrompt', {slots: names.join(', ')}), '');
+        if (!name?.trim()) return;
+        const idx = charCfg.slots.findIndex(s => s.name === name.trim());
+        if (idx < 0) { showToast(t('toast.itemNotFound', {name: name.trim()}), 'warning'); return; }
+        if (!confirm(t('confirm.deleteTable'))) return;
+        const deleted = charCfg.slots.splice(idx, 1)[0];
+        if (!charCfg._deletedSlots) charCfg._deletedSlots = [];
+        charCfg._deletedSlots.push(deleted.name);
+        const eqValues = _getEqValues();
+        if (eqValues[owner]) {
+            delete eqValues[owner][deleted.name];
+            if (!Object.keys(eqValues[owner]).length) delete eqValues[owner];
+        }
+        _saveEqData();
+        renderEquipmentValues();
+        _bindEquipmentEvents();
+        horaeManager.init(getContext(), settings);
+        _refreshSystemPromptDisplay();
+        updateTokenCounter();
+    });
+
+    // 锁定/解锁
+    $('#horae-rpg-eq-lock').off('click').on('click', () => {
+        const cfgMap = _getEqConfigMap();
+        cfgMap.locked = !cfgMap.locked;
+        _saveEqData();
+        const lockBtn = document.getElementById('horae-rpg-eq-lock');
+        if (lockBtn) {
+            lockBtn.querySelector('i').className = cfgMap.locked ? 'fa-solid fa-lock' : 'fa-solid fa-lock-open';
+            lockBtn.title = cfgMap.locked ? t('ui.locked') : t('ui.clickToLock');
+        }
+    });
+
+    // 卸下装备
+    $(container).off('click.eqitemdel').on('click.eqitemdel', '.horae-rpg-eq-item-del', function() {
+        const owner = this.dataset.owner;
+        const slotName = this.dataset.slot;
+        const itemName = this.dataset.item;
+        _unequipToItems(owner, slotName, itemName, false);
+        renderEquipmentValues();
+        _bindEquipmentEvents();
+        updateItemsDisplay();
+        updateAllRpgHuds();
+        showToast(t('toast.itemUnequipped', {item: itemName, owner, slot: slotName}), 'info');
+    });
+
+    // 手动添加装备
+    $(container).off('click.eqadditem').on('click.eqadditem', '.horae-rpg-eq-add-item', function() {
+        _openAddEquipDialog(this.dataset.owner);
+    });
+
+    // 导出全部装备配置
+    $('#horae-rpg-eq-export').off('click').on('click', () => {
+        const cfgMap = _getEqConfigMap();
+        const blob = new Blob([JSON.stringify({ horae_equipment_config: { version: 2, perChar: cfgMap.perChar, locked: cfgMap.locked } }, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+        a.download = 'horae-equipment-config.json'; a.click();
+        showToast(t('toast.equipmentExported'), 'success');
+    });
+
+    // 导入装备配置
+    $('#horae-rpg-eq-import').off('click').on('click', () => {
+        document.getElementById('horae-rpg-eq-import-file')?.click();
+    });
+    $('#horae-rpg-eq-import-file').off('change').on('change', function() {
+        const file = this.files?.[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const data = JSON.parse(e.target.result);
+                const imported = data?.horae_equipment_config;
+                if (!imported) { showToast(t('toast.invalidFile'), 'error'); return; }
+                if (imported.version === 2 && imported.perChar) {
+                    if (!confirm(t('confirm.importEquipment'))) return;
+                    const cfgMap = _getEqConfigMap();
+                    for (const [owner, cfg] of Object.entries(imported.perChar)) {
+                        cfgMap.perChar[owner] = JSON.parse(JSON.stringify(cfg));
+                    }
+                    if (imported.locked !== undefined) cfgMap.locked = imported.locked;
+                } else if (imported.slots?.length) {
+                    if (!confirm(t('confirm.importEquipment'))) return;
+                    const cfgMap = _getEqConfigMap();
+                    const eqValues = _getEqValues();
+                    for (const owner of Object.keys(eqValues)) {
+                        const charCfg = _getCharEqConfig(owner);
+                        const existing = new Set(charCfg.slots.map(s => s.name));
+                        for (const slot of imported.slots) {
+                            if (!existing.has(slot.name)) charCfg.slots.push({ name: slot.name, maxCount: slot.maxCount ?? 1 });
+                        }
+                    }
+                } else { showToast(t('toast.invalidFile'), 'error'); return; }
+                _saveEqData();
+                renderEquipmentValues();
+                _bindEquipmentEvents();
+                horaeManager.init(getContext(), settings);
+                _refreshSystemPromptDisplay();
+                updateTokenCounter();
+                showToast(t('toast.equipmentImported'), 'success');
+            } catch (err) { showToast(t('toast.importFailed', {error: err.message}), 'error'); }
+        };
+        reader.readAsText(file);
+        this.value = '';
+    });
+
+    // 管理模板（全局模板增删）
+    $('#horae-rpg-eq-preset').off('click').on('click', () => {
+        _openEquipTemplateManageModal();
+    });
+}
+
+/** 全局模板管理（增删模板，不加载到角色） */
+function _openEquipTemplateManageModal() {
+    const modal = document.createElement('div');
+    modal.className = 'horae-modal';
+    function _render() {
+        const tpls = settings.equipmentTemplates || [];
+        let listHtml = tpls.map((tpl, i) => {
+            const slotsStr = tpl.slots.map(s => s.name).join('、');
+            return `<div class="horae-rpg-tpl-item"><div class="horae-rpg-tpl-name">${escapeHtml(tpl.name)}</div>
+                <div class="horae-rpg-tpl-slots">${escapeHtml(slotsStr)}</div>
+                <button class="horae-rpg-btn-sm horae-rpg-tpl-del" data-idx="${i}" title="${t('common.delete')}"><i class="fa-solid fa-trash"></i></button>
+            </div>`;
+        }).join('');
+        if (!tpls.length) listHtml = `<div class="horae-rpg-skills-empty">${t('ui.noCustomTemplates')}</div>`;
+        modal.innerHTML = `<div class="horae-modal-content" style="max-width:460px;width:90vw;box-sizing:border-box;">
+            <div class="horae-modal-header"><h3>${t('modal.presetManager')}</h3></div>
+            <div class="horae-modal-body" style="max-height:55vh;overflow-y:auto;">
+                <div style="margin-bottom:6px;font-size:11px;color:var(--horae-text-muted);">${t('ui.templateManageHint')}</div>
+                ${listHtml}
+            </div>
+            <div class="horae-modal-footer"><button class="horae-btn" id="horae-tpl-mgmt-close">${t('common.close')}</button></div>
+        </div>`;
+        modal.querySelector('#horae-tpl-mgmt-close').onclick = () => modal.remove();
+        modal.querySelectorAll('.horae-rpg-tpl-del').forEach(btn => {
+            btn.onclick = () => {
+                const idx = parseInt(btn.dataset.idx);
+                const tpl = settings.equipmentTemplates[idx];
+                if (!confirm(t('confirm.deleteTheme', {name: tpl.name}))) return;
+                settings.equipmentTemplates.splice(idx, 1);
+                saveSettingsDebounced();
+                _render();
+            };
+        });
+    }
+    document.body.appendChild(modal);
+    preventModalBubble(modal);
+    _render();
+}
+
+// ============ 货币系统配置 ============
+
+function _getCurConfig() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return { denominations: [] };
+    if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
+    if (!chat[0].horae_meta.rpg) chat[0].horae_meta.rpg = {};
+    const c = _ensureRpgConfigs();
+    let cfg = c?.currencyConfig || chat[0].horae_meta.rpg.currencyConfig;
+    if (!cfg) {
+        cfg = { denominations: [] };
+    }
+    if (c) c.currencyConfig = cfg;
+    chat[0].horae_meta.rpg.currencyConfig = cfg;
+    return cfg;
+}
+
+function _saveCurData() {
+    const ctx = getContext();
+    if (ctx?.saveChat) ctx.saveChat();
+}
+
+function renderCurrencyConfig() {
+    const list = document.getElementById('horae-rpg-cur-denom-list');
+    if (!list) return;
+    const config = _getCurConfig();
+    if (!config.denominations.length) {
+        list.innerHTML = `<div class="horae-rpg-skills-empty">${t('ui.noCurrencies')}</div>`;
+        return;
+    }
+    list.innerHTML = config.denominations.map((d, i) => `
+        <div class="horae-rpg-config-row" data-idx="${i}">
+            <input class="horae-rpg-cur-emoji" value="${escapeHtml(d.emoji || '')}" placeholder="${t('placeholder.currencyEmoji')}" maxlength="2" data-idx="${i}" title="${t('label.icon')}" />
+            <input class="horae-rpg-cur-name" value="${escapeHtml(d.name)}" placeholder="${t('placeholder.currencyName')}" data-idx="${i}" />
+            <span style="opacity:.5;font-size:11px">${t('placeholder.currencyRate')}</span>
+            <input class="horae-rpg-cur-rate" value="${d.rate}" type="number" min="1" style="width:60px" title="${t('placeholder.currencyRate')}" data-idx="${i}" />
+            <button class="horae-rpg-cur-del" data-idx="${i}" title="${t('common.delete')}"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+    `).join('');
+    _renderCurrencyHint(config);
+}
+
+function _renderCurrencyHint(config) {
+    const section = document.getElementById('horae-rpg-cur-values-section');
+    if (!section) return;
+    const denoms = config.denominations;
+    if (denoms.length < 2) { section.innerHTML = ''; return; }
+    const sorted = [...denoms].sort((a, b) => a.rate - b.rate);
+    const base = sorted[0];
+    const parts = sorted.map(d => `${d.rate / base.rate}${d.name}`).join(' = ');
+    section.innerHTML = `<div class="horae-rpg-skills-empty" style="font-size:11px;opacity:.7">${t('ui.exchangeRate', {parts: escapeHtml(parts)})}</div>`;
+}
+
+function _bindCurrencyEvents() {
+    // 添加币种
+    $('#horae-rpg-cur-add').off('click').on('click', () => {
+        const config = _getCurConfig();
+        config.denominations.push({ name: t('ui.newCurrency'), rate: 1, emoji: '💰' });
+        _saveCurData();
+        renderCurrencyConfig();
+        horaeManager.init(getContext(), settings);
+        _refreshSystemPromptDisplay();
+        updateTokenCounter();
+    });
+
+    // 编辑币种 emoji
+    $(document).off('change', '.horae-rpg-cur-emoji').on('change', '.horae-rpg-cur-emoji', function() {
+        const config = _getCurConfig();
+        const idx = parseInt(this.dataset.idx);
+        config.denominations[idx].emoji = this.value.trim();
+        _saveCurData();
+    });
+
+    // 编辑币种名称
+    $(document).off('change', '.horae-rpg-cur-name').on('change', '.horae-rpg-cur-name', function() {
+        const config = _getCurConfig();
+        const idx = parseInt(this.dataset.idx);
+        const oldName = config.denominations[idx].name;
+        const newName = this.value.trim() || oldName;
+        if (newName !== oldName) {
+            config.denominations[idx].name = newName;
+            _saveCurData();
+            renderCurrencyConfig();
+            horaeManager.init(getContext(), settings);
+            _refreshSystemPromptDisplay();
+            updateTokenCounter();
+        }
+    });
+
+    // 编辑兑换率
+    $(document).off('change', '.horae-rpg-cur-rate').on('change', '.horae-rpg-cur-rate', function() {
+        const config = _getCurConfig();
+        const idx = parseInt(this.dataset.idx);
+        const val = Math.max(1, parseInt(this.value) || 1);
+        config.denominations[idx].rate = val;
+        _saveCurData();
+        renderCurrencyConfig();
+        horaeManager.init(getContext(), settings);
+        _refreshSystemPromptDisplay();
+        updateTokenCounter();
+    });
+
+    // 删除币种
+    $(document).off('click', '.horae-rpg-cur-del').on('click', '.horae-rpg-cur-del', function() {
+        const config = _getCurConfig();
+        const idx = parseInt(this.dataset.idx);
+        const name = config.denominations[idx].name;
+        if (!confirm(t('confirm.deleteTable'))) return;
+        config.denominations.splice(idx, 1);
+        // 清除所有角色该币种的数值
+        const chat = horaeManager.getChat();
+        const curData = chat?.[0]?.horae_meta?.rpg?.currency;
+        if (curData) {
+            for (const owner of Object.keys(curData)) {
+                delete curData[owner][name];
+                if (!Object.keys(curData[owner]).length) delete curData[owner];
+            }
+        }
+        _saveCurData();
+        renderCurrencyConfig();
+        horaeManager.init(getContext(), settings);
+        _refreshSystemPromptDisplay();
+        updateTokenCounter();
+    });
+
+    // 导出
+    $('#horae-rpg-cur-export').off('click').on('click', () => {
+        const config = _getCurConfig();
+        const blob = new Blob([JSON.stringify({ denominations: config.denominations }, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'horae_currency_config.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    });
+
+    // 导入
+    $('#horae-rpg-cur-import').off('click').on('click', () => {
+        document.getElementById('horae-rpg-cur-import-file')?.click();
+    });
+    $('#horae-rpg-cur-import-file').off('change').on('change', function() {
+        const file = this.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const imported = JSON.parse(e.target.result);
+                if (!imported.denominations?.length) { showToast(t('toast.invalidFile'), 'error'); return; }
+                if (!confirm(t('confirm.importReputation', {n: imported.denominations.length}))) return;
+                const config = _getCurConfig();
+                const existingNames = new Set(config.denominations.map(d => d.name));
+                let added = 0;
+                for (const d of imported.denominations) {
+                    if (existingNames.has(d.name)) continue;
+                    config.denominations.push({ name: d.name, rate: d.rate ?? 1 });
+                    added++;
+                }
+                _saveCurData();
+                renderCurrencyConfig();
+                horaeManager.init(getContext(), settings);
+                _refreshSystemPromptDisplay();
+                updateTokenCounter();
+                showToast(t('toast.currencyImported', {n: added}), 'success');
+            } catch (err) {
+                showToast(t('toast.importFailed', {error: err.message}), 'error');
+            }
+        };
+        reader.readAsText(file);
+        this.value = '';
+    });
+}
+
+// ══════════════ 据点/基地系统 ══════════════
+
+function _getStrongholdData() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return [];
+    if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
+    if (!chat[0].horae_meta.rpg) chat[0].horae_meta.rpg = {};
+    const c = _ensureRpgConfigs();
+    let nodes = c?.strongholds || chat[0].horae_meta.rpg.strongholds;
+    if (!nodes) nodes = [];
+    if (c) c.strongholds = nodes;
+    chat[0].horae_meta.rpg.strongholds = nodes;
+    return nodes;
+}
+function _saveStrongholdData() { _syncConfigsToRpg(); getContext().saveChat(); }
+
+function _genShId() { return 'sh_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+/** 构建子节点树 */
+function _buildShTree(nodes, parentId) {
+    return nodes
+        .filter(n => (n.parent || null) === parentId)
+        .map(n => ({ ...n, children: _buildShTree(nodes, n.id) }));
+}
+
+/** 渲染据点树形 UI */
+function renderStrongholdTree() {
+    const container = document.getElementById('horae-rpg-sh-tree');
+    if (!container) return;
+    const nodes = _getStrongholdData();
+    if (!nodes.length) {
+        container.innerHTML = `<div class="horae-rpg-skills-empty">${t('ui.noStrongholds')}</div>`;
+        return;
+    }
+    const tree = _buildShTree(nodes, null);
+    container.innerHTML = _renderShNodes(tree, 0);
+}
+
+function _renderShNodes(nodes, depth) {
+    let html = '';
+    for (const n of nodes) {
+        const indent = depth * 16;
+        const hasChildren = n.children && n.children.length > 0;
+        const lvBadge = n.level != null ? `<span class="horae-rpg-hud-lv-badge" style="font-size:10px;">Lv.${n.level}</span>` : '';
+        html += `<div class="horae-rpg-sh-node" data-id="${escapeHtml(n.id)}" style="padding-left:${indent}px;">`;
+        html += `<div class="horae-rpg-sh-node-head">`;
+        html += `<span class="horae-rpg-sh-node-name">${hasChildren ? '▼ ' : '• '}${escapeHtml(n.name)}</span>`;
+        html += lvBadge;
+        html += `<div class="horae-rpg-sh-node-actions">`;
+        html += `<button class="horae-rpg-btn-sm horae-rpg-sh-add-child" data-id="${escapeHtml(n.id)}" title="${t('tooltip.addChild')}"><i class="fa-solid fa-plus"></i></button>`;
+        html += `<button class="horae-rpg-btn-sm horae-rpg-sh-edit" data-id="${escapeHtml(n.id)}" title="${t('common.edit')}"><i class="fa-solid fa-pen"></i></button>`;
+        html += `<button class="horae-rpg-btn-sm horae-rpg-sh-del" data-id="${escapeHtml(n.id)}" title="${t('common.delete')}"><i class="fa-solid fa-trash"></i></button>`;
+        html += `</div></div>`;
+        if (n.desc) {
+            html += `<div class="horae-rpg-sh-node-desc" style="padding-left:${indent + 12}px;">${escapeHtml(n.desc)}</div>`;
+        }
+        if (hasChildren) html += _renderShNodes(n.children, depth + 1);
+        html += '</div>';
+    }
+    return html;
+}
+
+function _openShEditDialog(nodeId) {
+    const nodes = _getStrongholdData();
+    const node = nodeId ? nodes.find(n => n.id === nodeId) : null;
+    const isNew = !node;
+    const modal = document.createElement('div');
+    modal.className = 'horae-modal';
+    modal.innerHTML = `
+        <div class="horae-modal-content" style="max-width:400px;width:90vw;box-sizing:border-box;">
+            <div class="horae-modal-header"><h3>${isNew ? t('ui.addStrongholdTitle') : t('ui.editStrongholdTitle')}</h3></div>
+            <div class="horae-modal-body">
+                <div class="horae-edit-field">
+                    <label>${t('label.name')}</label>
+                    <input id="horae-sh-name" type="text" value="${escapeHtml(node?.name || '')}" placeholder="${t('placeholder.strongholdName')}" />
+                </div>
+                <div class="horae-edit-field">
+                    <label>${t('label.level')} (${t('common.skip').toLowerCase()})</label>
+                    <input id="horae-sh-level" type="number" min="0" max="999" value="${node?.level ?? ''}" />
+                </div>
+                <div class="horae-edit-field">
+                    <label>${t('label.description')}</label>
+                    <textarea id="horae-sh-desc" rows="3" placeholder="${t('placeholder.strongholdDesc')}">${escapeHtml(node?.desc || '')}</textarea>
+                </div>
+            </div>
+            <div class="horae-modal-footer">
+                <button class="horae-btn primary" id="horae-sh-ok">${isNew ? t('common.add') : t('common.save')}</button>
+                <button class="horae-btn" id="horae-sh-cancel">${t('common.cancel')}</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    preventModalBubble(modal);
+    modal.querySelector('#horae-sh-ok').onclick = () => {
+        const name = modal.querySelector('#horae-sh-name').value.trim();
+        if (!name) { showToast(t('toast.strongholdNameRequired'), 'warning'); return; }
+        const lvRaw = modal.querySelector('#horae-sh-level').value;
+        const level = lvRaw !== '' ? parseInt(lvRaw) : null;
+        const desc = modal.querySelector('#horae-sh-desc').value.trim();
+        if (node) {
+            node.name = name;
+            node.level = level;
+            node.desc = desc;
+        }
+        _saveStrongholdData();
+        renderStrongholdTree();
+        _bindStrongholdEvents();
+        horaeManager.init(getContext(), settings);
+        _refreshSystemPromptDisplay();
+        updateTokenCounter();
+        modal.remove();
+    };
+    modal.querySelector('#horae-sh-cancel').onclick = () => modal.remove();
+    return modal;
+}
+
+function _bindStrongholdEvents() {
+    const container = document.getElementById('horae-rpg-sh-tree');
+    if (!container) return;
+
+    // 添加根据点
+    $('#horae-rpg-sh-add').off('click').on('click', () => {
+        const nodes = _getStrongholdData();
+        const modal = _openShEditDialog(null);
+        modal.querySelector('#horae-sh-ok').onclick = () => {
+            const name = modal.querySelector('#horae-sh-name').value.trim();
+            if (!name) { showToast(t('toast.strongholdNameRequired'), 'warning'); return; }
+            const lvRaw = modal.querySelector('#horae-sh-level').value;
+            const level = lvRaw !== '' ? parseInt(lvRaw) : null;
+            const desc = modal.querySelector('#horae-sh-desc').value.trim();
+            nodes.push({ id: _genShId(), name, level, desc, parent: null, _userAdded: true });
+            _saveStrongholdData();
+            renderStrongholdTree();
+            _bindStrongholdEvents();
+            horaeManager.init(getContext(), settings);
+            _refreshSystemPromptDisplay();
+            updateTokenCounter();
+            modal.remove();
+        };
+    });
+
+    // 添加子节点
+    container.querySelectorAll('.horae-rpg-sh-add-child').forEach(btn => {
+        btn.onclick = () => {
+            const parentId = btn.dataset.id;
+            const nodes = _getStrongholdData();
+            const modal = _openShEditDialog(null);
+            modal.querySelector('#horae-sh-ok').onclick = () => {
+                const name = modal.querySelector('#horae-sh-name').value.trim();
+                if (!name) { showToast(t('toast.nameRequired'), 'warning'); return; }
+                const lvRaw = modal.querySelector('#horae-sh-level').value;
+                const level = lvRaw !== '' ? parseInt(lvRaw) : null;
+                const desc = modal.querySelector('#horae-sh-desc').value.trim();
+                nodes.push({ id: _genShId(), name, level, desc, parent: parentId, _userAdded: true });
+                _saveStrongholdData();
+                renderStrongholdTree();
+                _bindStrongholdEvents();
+                horaeManager.init(getContext(), settings);
+                modal.remove();
+            };
+        };
+    });
+
+    // 编辑
+    container.querySelectorAll('.horae-rpg-sh-edit').forEach(btn => {
+        btn.onclick = () => { _openShEditDialog(btn.dataset.id); };
+    });
+
+    // 删除（递归删除子节点 + 记录到 _deletedStrongholds 防回滚）
+    container.querySelectorAll('.horae-rpg-sh-del').forEach(btn => {
+        btn.onclick = () => {
+            const nodes = _getStrongholdData();
+            const id = btn.dataset.id;
+            const node = nodes.find(n => n.id === id);
+            if (!node) return;
+            function countDescendants(pid) {
+                const kids = nodes.filter(n => n.parent === pid);
+                return kids.length + kids.reduce((s, k) => s + countDescendants(k.id), 0);
+            }
+            const desc = countDescendants(id);
+            const childDesc = desc > 0 ? t('ui.andChildNodes', {n: desc}) : '';
+            const msg = t('confirm.deleteStronghold', {name: node.name, childDesc}) + (desc > 0 ? ' ' + t('confirm.deleteStrongholdUndo') : '');
+            if (!confirm(msg)) return;
+            const chat = horaeManager.getChat();
+            const rpg = chat?.[0]?.horae_meta?.rpg;
+            if (rpg) {
+                if (!rpg._deletedStrongholds) rpg._deletedStrongholds = [];
+                const cfgs = _ensureRpgConfigs();
+                if (cfgs && !cfgs._deletedStrongholds) cfgs._deletedStrongholds = rpg._deletedStrongholds;
+                function collectDeleted(pid) {
+                    const n = nodes.find(x => x.id === pid);
+                    if (n) {
+                        const parentNode = n.parent ? nodes.find(x => x.id === n.parent) : null;
+                        const entry = { name: n.name, parent: parentNode?.name || null };
+                        rpg._deletedStrongholds.push(entry);
+                        if (cfgs && cfgs._deletedStrongholds !== rpg._deletedStrongholds) cfgs._deletedStrongholds.push(entry);
+                    }
+                    nodes.filter(x => x.parent === pid).forEach(k => collectDeleted(k.id));
+                }
+                collectDeleted(id);
+            }
+            function removeRecursive(pid) {
+                const kids = nodes.filter(n => n.parent === pid);
+                for (const k of kids) removeRecursive(k.id);
+                const idx = nodes.findIndex(n => n.id === pid);
+                if (idx >= 0) nodes.splice(idx, 1);
+            }
+            removeRecursive(id);
+            _saveStrongholdData();
+            renderStrongholdTree();
+            _bindStrongholdEvents();
+            horaeManager.init(getContext(), settings);
+            _refreshSystemPromptDisplay();
+            updateTokenCounter();
+        };
+    });
+
+    // 导出
+    $('#horae-rpg-sh-export').off('click').on('click', () => {
+        const data = _getStrongholdData();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+        a.download = 'horae_strongholds.json'; a.click();
+    });
+    // 导入
+    $('#horae-rpg-sh-import').off('click').on('click', () => {
+        document.getElementById('horae-rpg-sh-import-file')?.click();
+    });
+    $('#horae-rpg-sh-import-file').off('change').on('change', function() {
+        const file = this.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const imported = JSON.parse(e.target.result);
+                if (!Array.isArray(imported)) throw new Error(t('ui.invalidFormat'));
+                const nodes = _getStrongholdData();
+                const existingNames = new Set(nodes.map(n => n.name));
+                const idMap = {};
+                let added = 0;
+                for (const n of imported) {
+                    if (!n.name) continue;
+                    if (existingNames.has(n.name)) {
+                        const existing = nodes.find(x => x.name === n.name);
+                        if (existing && n.id) idMap[n.id] = existing.id;
+                        continue;
+                    }
+                    const newId = _genShId();
+                    if (n.id) idMap[n.id] = newId;
+                    nodes.push({ id: newId, name: n.name, level: n.level ?? null, desc: n.desc || '', parent: n.parent || null });
+                    existingNames.add(n.name);
+                    added++;
+                }
+                for (const node of nodes) {
+                    if (node.parent && idMap[node.parent]) {
+                        node.parent = idMap[node.parent];
+                    }
+                }
+                _saveStrongholdData();
+                renderStrongholdTree();
+                _bindStrongholdEvents();
+                showToast(t('toast.strongholdImported', {n: added}), 'success');
+            } catch (err) { showToast(t('toast.importFailed', {error: err.message}), 'error'); }
+        };
+        reader.readAsText(file);
+        this.value = '';
+    });
+}
+
+/** 渲染等级/经验值数据（配置面板） */
+function renderLevelValues() {
+    const section = document.getElementById('horae-rpg-level-values-section');
+    if (!section) return;
+    const snapshot = horaeManager.getRpgStateAt(0);
+    const chat = horaeManager.getChat();
+    const baseRpg = chat?.[0]?.horae_meta?.rpg || {};
+    const mergedLevels = { ...(snapshot.levels || {}), ...(baseRpg.levels || {}) };
+    const mergedXp = { ...(snapshot.xp || {}), ...(baseRpg.xp || {}) };
+    const allNames = new Set([...Object.keys(mergedLevels), ...Object.keys(mergedXp), ...Object.keys(snapshot.bars || {})]);
+    const _lvUO = !!settings.rpgLevelUserOnly;
+    const _lvUserName = getContext().name1 || '';
+    let html = `<div style="display:flex;justify-content:flex-end;margin-bottom:6px;"><button class="horae-rpg-btn-sm horae-rpg-lv-add" title="${t('ui.addLevelCharTitle')}"><i class="fa-solid fa-plus"></i> ${t('ui.addLevelChar')}</button></div>`;
+    if (!allNames.size) {
+        html += `<div class="horae-rpg-skills-empty">${t('ui.noLevelData')}</div>`;
+    }
+    for (const name of allNames) {
+        if (_lvUO && name !== _lvUserName) continue;
+        const lv = mergedLevels[name];
+        const xp = mergedXp[name];
+        const xpCur = xp ? xp[0] : 0;
+        const xpMax = xp ? xp[1] : 0;
+        const pct = xpMax > 0 ? Math.min(100, Math.round(xpCur / xpMax * 100)) : 0;
+        html += `<div class="horae-rpg-lv-entry" data-char="${escapeHtml(name)}">`;
+        html += `<div class="horae-rpg-lv-entry-header">`;
+        html += `<span class="horae-rpg-lv-entry-name">${escapeHtml(name)}</span>`;
+        html += `<span class="horae-rpg-hud-lv-badge">${lv != null ? 'Lv.' + lv : '--'}</span>`;
+        html += `<button class="horae-rpg-btn-sm horae-rpg-lv-edit" data-char="${escapeHtml(name)}" title="${t('tooltip.editLevelXp')}"><i class="fa-solid fa-pen-to-square"></i></button>`;
+        html += `</div>`;
+        if (xpMax > 0) {
+            html += `<div class="horae-rpg-lv-xp-row"><div class="horae-rpg-bar-track"><div class="horae-rpg-bar-fill" style="width:${pct}%;background:#a78bfa;"></div></div><span class="horae-rpg-lv-xp-label">${xpCur}/${xpMax} (${pct}%)</span></div>`;
+        }
+        html += '</div>';
+    }
+    section.innerHTML = html;
+
+    const _lvEditHandler = (charName) => {
+        const chat2 = horaeManager.getChat();
+        if (!chat2?.length) return;
+        if (!chat2[0].horae_meta) chat2[0].horae_meta = createEmptyMeta();
+        if (!chat2[0].horae_meta.rpg) chat2[0].horae_meta.rpg = {};
+        const rpgData = chat2[0].horae_meta.rpg;
+        const curLv = rpgData.levels?.[charName] ?? '';
+        const newLv = prompt(t('toast.levelPrompt', {name: charName}), curLv);
+        if (newLv === null) return;
+        const lvVal = parseInt(newLv);
+        if (isNaN(lvVal) || lvVal < 0) { showToast(t('toast.invalidLevelNumber'), 'warning'); return; }
+        if (!rpgData.levels) rpgData.levels = {};
+        if (!rpgData.xp) rpgData.xp = {};
+        rpgData.levels[charName] = lvVal;
+        const xpMax = Math.max(100, lvVal * 100);
+        const curXp = rpgData.xp[charName];
+        if (!curXp || curXp[1] <= 0) {
+            rpgData.xp[charName] = [0, xpMax];
+        } else {
+            rpgData.xp[charName] = [curXp[0], xpMax];
+        }
+        getContext().saveChat();
+        renderLevelValues();
+        updateAllRpgHuds();
+        showToast(t('toast.levelSet', {name: charName, level: lvVal, xp: xpMax}), 'success');
+    };
+
+    section.querySelectorAll('.horae-rpg-lv-edit').forEach(btn => {
+        btn.addEventListener('click', () => _lvEditHandler(btn.dataset.char));
+    });
+
+    const addBtn = section.querySelector('.horae-rpg-lv-add');
+    if (addBtn) {
+        addBtn.addEventListener('click', () => {
+            const charName = prompt(t('label.npcName') + ':');
+            if (!charName?.trim()) return;
+            _lvEditHandler(charName.trim());
+        });
+    }
+}
+
+/**
+ * 构建单个角色在 HUD 中的 HTML
+ * 布局: 角色名(+状态图标) | Lv.X 💵999 | XP条 | 属性条
+ */
+function _buildCharHudHtml(name, rpg) {
+    const bars = rpg.bars[name] || {};
+    const effects = rpg.status?.[name] || [];
+    const charLv = rpg.levels?.[name];
+    const charXp = rpg.xp?.[name];
+    const charCur = rpg.currency?.[name] || {};
+    const denomCfg = rpg.currencyConfig?.denominations || [];
+    const sendLvl = !!settings.sendRpgLevel;
+    const sendCur = !!settings.sendRpgCurrency;
+
+    let html = '<div class="horae-rpg-hud-row">';
+
+    // 第一行: 角色名 + 等级 + 状态图标 ....... 货币(右端)
+    html += '<div class="horae-rpg-hud-header">';
+    html += `<span class="horae-rpg-hud-name">${escapeHtml(name)}</span>`;
+    if (sendLvl && charLv != null) html += `<span class="horae-rpg-hud-lv-badge">Lv.${charLv}</span>`;
+    for (const e of effects) {
+        html += `<i class="fa-solid ${getStatusIcon(e)} horae-rpg-hud-effect" title="${escapeHtml(e)}"></i>`;
+    }
+    // 货币：推到最右
+    if (sendCur && denomCfg.length > 0) {
+        let curHtml = '';
+        for (const d of denomCfg) {
+            const v = charCur[d.name];
+            if (v == null) continue;
+            curHtml += `<span class="horae-rpg-hud-cur-tag">${d.emoji || '💰'}${escapeHtml(String(v))}</span>`;
+        }
+        if (curHtml) html += `<span class="horae-rpg-hud-right">${curHtml}</span>`;
+    }
+    html += '</div>';
+
+    // XP 条（如果有）
+    if (sendLvl && charXp && charXp[1] > 0) {
+        const pct = Math.min(100, Math.round(charXp[0] / charXp[1] * 100));
+        html += `<div class="horae-rpg-hud-bar horae-rpg-hud-xp"><span class="horae-rpg-hud-lbl">XP</span><div class="horae-rpg-hud-track"><div class="horae-rpg-hud-fill" style="width:${pct}%;background:#a78bfa;"></div></div><span class="horae-rpg-hud-val">${charXp[0]}/${charXp[1]}</span></div>`;
+    }
+
+    // 属性条
+    for (const [type, val] of Object.entries(bars)) {
+        const label = getRpgBarName(type, val[2]);
+        const cur = val[0], max = val[1];
+        const pct = max > 0 ? Math.min(100, Math.round(cur / max * 100)) : 0;
+        const color = getRpgBarColor(type);
+        html += `<div class="horae-rpg-hud-bar"><span class="horae-rpg-hud-lbl">${escapeHtml(label)}</span><div class="horae-rpg-hud-track"><div class="horae-rpg-hud-fill" style="width:${pct}%;background:${color};"></div></div><span class="horae-rpg-hud-val">${cur}/${max}</span></div>`;
+    }
+
+    html += '</div>';
+    return html;
+}
+
+/**
+ * 从 present 列表与 RPG 数据中匹配在场角色
+ */
+function _matchPresentChars(present, rpg) {
+    const userName = getContext().name1 || '';
+    const allRpgNames = new Set([
+        ...Object.keys(rpg.bars || {}), ...Object.keys(rpg.status || {}),
+        ...Object.keys(rpg.levels || {}), ...Object.keys(rpg.xp || {}),
+        ...Object.keys(rpg.currency || {}),
+    ]);
+    const chars = [];
+    for (const p of present) {
+        const n = p.trim();
+        if (!n) continue;
+        let match = null;
+        if (allRpgNames.has(n)) match = n;
+        else if (n === userName && allRpgNames.has(userName)) match = userName;
+        else {
+            for (const rn of allRpgNames) {
+                if (rn.includes(n) || n.includes(rn)) { match = rn; break; }
+            }
+        }
+        if (match && !chars.includes(match)) chars.push(match);
+    }
+    return chars;
+}
+
+/** 为单个消息面板渲染 RPG HUD（简易状态条） */
+function renderRpgHud(messageEl, messageIndex) {
+    const old = messageEl.querySelector('.horae-rpg-hud');
+    if (old) old.remove();
+    if (!settings.rpgMode || settings.sendRpgBars === false) return;
+
+    const _hChat = horaeManager.getChat();
+    const chatLen = _hChat?.length || 0;
+    const skip = Math.max(0, chatLen - messageIndex - 1);
+    const rpg = horaeManager.getRpgStateAt(skip);
+    const _hCfgs = _hChat?.[0]?.horae_meta?._rpgConfigs;
+    if (!rpg.currencyConfig) rpg.currencyConfig = _hCfgs?.currencyConfig || _hChat?.[0]?.horae_meta?.rpg?.currencyConfig || { denominations: [] };
+
+    const meta = horaeManager.getMessageMeta(messageIndex);
+    const present = meta?.scene?.characters_present || [];
+    if (present.length === 0) return;
+
+    let chars = _matchPresentChars(present, rpg);
+    if (settings.rpgBarsUserOnly) {
+        const _huN = getContext().name1 || '';
+        chars = chars.filter(n => n === _huN);
+    }
+    if (chars.length === 0) return;
+
+    let html = '<div class="horae-rpg-hud">';
+    for (const name of chars) html += _buildCharHudHtml(name, rpg);
+    html += '</div>';
+
+    const panel = messageEl.querySelector('.horae-message-panel');
+    if (panel) {
+        panel.insertAdjacentHTML('beforebegin', html);
+        const hudEl = messageEl.querySelector('.horae-rpg-hud');
+        if (hudEl) {
+            const w = Math.max(50, Math.min(100, settings.panelWidth || 100));
+            if (w < 100) hudEl.style.maxWidth = `${w}%`;
+            const ofs = Math.max(0, settings.panelOffset || 0);
+            if (ofs > 0) hudEl.style.marginLeft = `${ofs}px`;
+            if (isLightMode()) hudEl.classList.add('horae-light');
+        }
+    }
+}
+
+/** 刷新所有可见面板的 RPG HUD */
+function updateAllRpgHuds() {
+    if (!settings.rpgMode || settings.sendRpgBars === false) return;
+    // 单次前向遍历构建每条消息的 RPG 累积快照
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return;
+    const snapMap = _buildRpgSnapshotMap(chat);
+    document.querySelectorAll('.mes').forEach(mesEl => {
+        const id = parseInt(mesEl.getAttribute('mesid'));
+        if (!isNaN(id)) _renderRpgHudFromSnapshot(mesEl, id, snapMap.get(id));
+    });
+}
+
+/** 单次遍历构建消息→RPG快照的映射 */
+function _buildRpgSnapshotMap(chat) {
+    const map = new Map();
+    const baseRpg = chat[0]?.horae_meta?.rpg || {};
+    const acc = {
+        bars: {}, status: {}, skills: {}, attributes: {},
+        levels: { ...(baseRpg.levels || {}) },
+        xp: { ...(baseRpg.xp || {}) },
+        currency: JSON.parse(JSON.stringify(baseRpg.currency || {})),
+    };
+    const resolve = (raw) => horaeManager._resolveRpgOwner(raw);
+    const _bCfgs = chat[0]?.horae_meta?._rpgConfigs;
+    const curConfig = _bCfgs?.currencyConfig || baseRpg.currencyConfig || { denominations: [] };
+    const validDenoms = new Set((curConfig.denominations || []).map(d => d.name));
+
+    for (let i = 0; i < chat.length; i++) {
+        const changes = chat[i]?.horae_meta?._rpgChanges;
+        if (changes && i > 0) {
+            for (const [raw, bd] of Object.entries(changes.bars || {})) {
+                const o = resolve(raw);
+                if (!acc.bars[o]) acc.bars[o] = {};
+                Object.assign(acc.bars[o], bd);
+            }
+            for (const [raw, ef] of Object.entries(changes.status || {})) {
+                acc.status[resolve(raw)] = ef;
+            }
+            for (const sk of (changes.skills || [])) {
+                const o = resolve(sk.owner);
+                if (!acc.skills[o]) acc.skills[o] = [];
+                const idx = acc.skills[o].findIndex(s => s.name === sk.name);
+                if (idx >= 0) { if (sk.level) acc.skills[o][idx].level = sk.level; if (sk.desc) acc.skills[o][idx].desc = sk.desc; }
+                else acc.skills[o].push({ name: sk.name, level: sk.level, desc: sk.desc });
+            }
+            for (const sk of (changes.removedSkills || [])) {
+                const o = resolve(sk.owner);
+                if (acc.skills[o]) acc.skills[o] = acc.skills[o].filter(s => s.name !== sk.name);
+            }
+            for (const [raw, vals] of Object.entries(changes.attributes || {})) {
+                const o = resolve(raw);
+                acc.attributes[o] = { ...(acc.attributes[o] || {}), ...vals };
+            }
+            for (const [raw, val] of Object.entries(changes.levels || {})) {
+                acc.levels[resolve(raw)] = val;
+            }
+            for (const [raw, val] of Object.entries(changes.xp || {})) {
+                acc.xp[resolve(raw)] = val;
+            }
+            for (const c of (changes.currency || [])) {
+                const o = resolve(c.owner);
+                if (!validDenoms.has(c.name)) continue;
+                if (!acc.currency[o]) acc.currency[o] = {};
+                if (c.isDelta) {
+                    acc.currency[o][c.name] = (acc.currency[o][c.name] || 0) + c.value;
+                } else {
+                    acc.currency[o][c.name] = c.value;
+                }
+            }
+        }
+        const snap = JSON.parse(JSON.stringify(acc));
+        snap.currencyConfig = curConfig;
+        map.set(i, snap);
+    }
+    return map;
+}
+
+/** 用预构建的快照渲染单条消息的 RPG HUD */
+function _renderRpgHudFromSnapshot(messageEl, messageIndex, rpg) {
+    const old = messageEl.querySelector('.horae-rpg-hud');
+    if (old) old.remove();
+    if (!rpg) return;
+
+    const meta = horaeManager.getMessageMeta(messageIndex);
+    const present = meta?.scene?.characters_present || [];
+    if (present.length === 0) return;
+
+    let chars = _matchPresentChars(present, rpg);
+    if (settings.rpgBarsUserOnly) {
+        const _huN = getContext().name1 || '';
+        chars = chars.filter(n => n === _huN);
+    }
+    if (chars.length === 0) return;
+
+    let html = '<div class="horae-rpg-hud">';
+    for (const name of chars) html += _buildCharHudHtml(name, rpg);
+    html += '</div>';
+
+    const panel = messageEl.querySelector('.horae-message-panel');
+    if (panel) {
+        panel.insertAdjacentHTML('beforebegin', html);
+        const hudEl = messageEl.querySelector('.horae-rpg-hud');
+        if (hudEl) {
+            const w = Math.max(50, Math.min(100, settings.panelWidth || 100));
+            if (w < 100) hudEl.style.maxWidth = `${w}%`;
+            const ofs = Math.max(0, settings.panelOffset || 0);
+            if (ofs > 0) hudEl.style.marginLeft = `${ofs}px`;
+            if (isLightMode()) hudEl.classList.add('horae-light');
+        }
+    }
+}
+
+/**
+ * 刷新所有显示
+ */
+function refreshAllDisplays() {
+    buildPanelContent._affCache = null;
+    enforceHiddenState();
+    updateStatusDisplay();
+    updateAgendaDisplay();
+    updateTimelineDisplay();
+    updateCharactersDisplay();
+    updateItemsDisplay();
+    updateLocationMemoryDisplay();
+    updateRpgDisplay();
+    updateTokenCounter();
+}
+
+/** chat[0] 上的全局键——无法由 rebuild 系列函数重建，需在 meta 重置时保留 */
+const _GLOBAL_META_KEYS = [
+    'autoSummaries', '_deletedNpcs', '_deletedAgendaTexts',
+    'locationMemory', 'relationships', 'rpg',
+    '_rpgConfigs', '_pendingScanReview',
+];
+
+function _saveGlobalMeta(meta) {
+    if (!meta) return null;
+    const saved = {};
+    for (const key of _GLOBAL_META_KEYS) {
+        if (meta[key] !== undefined) saved[key] = meta[key];
+    }
+    return Object.keys(saved).length ? saved : null;
+}
+
+function _restoreGlobalMeta(meta, saved) {
+    if (!saved || !meta) return;
+    for (const key of _GLOBAL_META_KEYS) {
+        if (saved[key] === undefined) continue;
+        if (meta[key] === undefined) {
+            meta[key] = saved[key];
+        } else if (key === 'rpg' && typeof saved[key] === 'object' && typeof meta[key] === 'object') {
+            for (const rk of Object.keys(saved[key])) {
+                if (meta[key][rk] === undefined) {
+                    meta[key][rk] = saved[key][rk];
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 提取消息事件上的摘要压缩标记（_compressedBy / _summaryId），
+ * 用于在 createEmptyMeta() 重置后恢复，防止摘要事件从时间线中逃逸
+ */
+function _saveCompressedFlags(meta) {
+    if (!meta?.events?.length) return null;
+    const flags = [];
+    for (const evt of meta.events) {
+        if (evt._compressedBy || evt._summaryId) {
+            flags.push({
+                summary: evt.summary || '',
+                _compressedBy: evt._compressedBy || null,
+                _summaryId: evt._summaryId || null,
+                isSummary: !!evt.isSummary,
+            });
+        }
+    }
+    return flags.length ? flags : null;
+}
+
+/**
+ * 将保存的压缩标记恢复到重新解析后的事件上；
+ * 若新事件数量少于保存的标记，则将多出的摘要事件追加回去
+ */
+function _restoreCompressedFlags(meta, saved) {
+    if (!saved?.length || !meta) return;
+    if (!meta.events) meta.events = [];
+    const nonSummaryFlags = saved.filter(f => !f.isSummary);
+    const summaryFlags = saved.filter(f => f.isSummary);
+    for (let i = 0; i < Math.min(nonSummaryFlags.length, meta.events.length); i++) {
+        const evt = meta.events[i];
+        if (evt.isSummary || evt._summaryId) continue;
+        if (nonSummaryFlags[i]._compressedBy) {
+            evt._compressedBy = nonSummaryFlags[i]._compressedBy;
+        }
+    }
+    // 如果非摘要事件数量不匹配，按 summaryId 暴力匹配
+    if (nonSummaryFlags.length > 0 && meta.events.length > 0) {
+        const chat = horaeManager.getChat();
+        const sums = chat?.[0]?.horae_meta?.autoSummaries || [];
+        const activeSumIds = new Set(sums.filter(s => s.active).map(s => s.id));
+        for (const evt of meta.events) {
+            if (evt.isSummary || evt._summaryId || evt._compressedBy) continue;
+            const matchFlag = nonSummaryFlags.find(f => f._compressedBy && activeSumIds.has(f._compressedBy));
+            if (matchFlag) evt._compressedBy = matchFlag._compressedBy;
+        }
+    }
+    // 将摘要卡片事件追加回去（processAIResponse 不会从原文解析出摘要卡片）
+    for (const sf of summaryFlags) {
+        const alreadyExists = meta.events.some(e => e._summaryId === sf._summaryId);
+        if (!alreadyExists && sf._summaryId) {
+            meta.events.push({
+                summary: sf.summary,
+                isSummary: true,
+                _summaryId: sf._summaryId,
+                level: '摘要',
+            });
+        }
+    }
+}
+
+/**
+ * 清理孤儿摘要：如果某个 active 摘要的卡片事件在整个聊天中找不到，
+ * 则清除该摘要范围内的 _compressedBy / is_hidden，并将摘要标记为 inactive。
+ * 返回清理的摘要数量。
+ */
+function cleanOrphanSummaries() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return 0;
+    const sums = chat[0]?.horae_meta?.autoSummaries;
+    if (!sums?.length) return 0;
+
+    let cleaned = 0;
+    for (const s of sums) {
+        if (!s.active || !s.range || !s.id) continue;
+        const summaryId = s.id;
+        let cardFound = false;
+        for (let i = s.range[0]; i <= s.range[1] && i < chat.length; i++) {
+            const evts = chat[i]?.horae_meta?.events;
+            if (evts?.some(e => e._summaryId === summaryId && e.isSummary)) {
+                cardFound = true;
+                break;
+            }
+        }
+        if (cardFound) continue;
+
+        console.log(`[Horae] 孤儿摘要 ${summaryId}: 卡片事件缺失，清理压缩标记`);
+        s.active = false;
+        for (let i = s.range[0]; i <= s.range[1] && i < chat.length; i++) {
+            if (i === 0 || !chat[i]) continue;
+            if (chat[i].is_hidden) {
+                chat[i].is_hidden = false;
+                const $el = $(`.mes[mesid="${i}"]`);
+                if ($el.length) $el.attr('is_hidden', 'false');
+            }
+            const evts = chat[i]?.horae_meta?.events;
+            if (evts) {
+                for (const evt of evts) {
+                    if (evt._compressedBy === summaryId) delete evt._compressedBy;
+                }
+            }
+        }
+        cleaned++;
+    }
+    if (cleaned > 0) {
+        console.log(`[Horae] cleanOrphanSummaries: 清理了 ${cleaned} 个孤儿摘要`);
+    }
+    return cleaned;
+}
+
+/**
+ * 校验并修复摘要范围内消息的 is_hidden 和 _compressedBy 状态，
+ * 防止 SillyTavern 重渲染或 saveChat 竞态导致隐藏/压缩标记丢失。
+ * 会先清理孤儿摘要，再对仍然有效的摘要补全标记。
+ */
+async function enforceHiddenState() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return;
+    const sums = chat[0]?.horae_meta?.autoSummaries;
+    if (!sums?.length) return;
+
+    const orphansCleaned = cleanOrphanSummaries();
+
+    let fixed = 0;
+    for (const s of sums) {
+        if (!s.active || !s.range) continue;
+        const summaryId = s.id;
+        for (let i = s.range[0]; i <= s.range[1]; i++) {
+            if (i === 0 || !chat[i]) continue;
+            if (!chat[i].is_hidden) {
+                chat[i].is_hidden = true;
+                fixed++;
+                const $el = $(`.mes[mesid="${i}"]`);
+                if ($el.length) $el.attr('is_hidden', 'true');
+            }
+            const events = chat[i].horae_meta?.events;
+            if (events) {
+                for (const evt of events) {
+                    if (!evt.isSummary && !evt._summaryId && !evt._compressedBy) {
+                        evt._compressedBy = summaryId;
+                        fixed++;
+                    }
+                }
+            }
+        }
+    }
+    if (fixed > 0 || orphansCleaned > 0) {
+        console.log(`[Horae] enforceHiddenState: 修复了 ${fixed} 处摘要状态, 清理了 ${orphansCleaned} 个孤儿`);
+        await getContext().saveChat();
+    }
+}
+
+/**
+ * 手动一键修复：先清理孤儿摘要，再对仍然有效的活跃摘要
+ * 强制恢复 is_hidden + _compressedBy，并同步 DOM 属性。返回修复的条目数。
+ */
+function repairAllSummaryStates() {
+    const chat = horaeManager.getChat();
+    if (!chat?.length) return 0;
+    const sums = chat[0]?.horae_meta?.autoSummaries;
+    if (!sums?.length) return 0;
+
+    const orphansCleaned = cleanOrphanSummaries();
+
+    let fixed = 0;
+    for (const s of sums) {
+        if (!s.active || !s.range) continue;
+        const summaryId = s.id;
+        for (let i = s.range[0]; i <= s.range[1]; i++) {
+            if (i === 0 || !chat[i]) continue;
+            if (!chat[i].is_hidden) {
+                chat[i].is_hidden = true;
+                fixed++;
+            }
+            const $el = $(`.mes[mesid="${i}"]`);
+            if ($el.length) $el.attr('is_hidden', 'true');
+            const events = chat[i].horae_meta?.events;
+            if (events) {
+                for (const evt of events) {
+                    if (!evt.isSummary && !evt._summaryId && !evt._compressedBy) {
+                        evt._compressedBy = summaryId;
+                        fixed++;
+                    }
+                }
+            }
+        }
+    }
+    if (fixed > 0 || orphansCleaned > 0) {
+        console.log(`[Horae] repairAllSummaryStates: 修复了 ${fixed} 处, 清理了 ${orphansCleaned} 个孤儿`);
+        getContext().saveChat();
+    }
+    return fixed + orphansCleaned;
+}
+
+/** 刷新所有已展开的底部面板 */
+function refreshVisiblePanels() {
+    document.querySelectorAll('.horae-message-panel').forEach(panelEl => {
+        const msgEl = panelEl.closest('.mes');
+        if (!msgEl) return;
+        const msgId = parseInt(msgEl.getAttribute('mesid'));
+        if (isNaN(msgId)) return;
+        const chat = horaeManager.getChat();
+        const meta = chat?.[msgId]?.horae_meta;
+        if (!meta) return;
+        const contentEl = panelEl.querySelector('.horae-panel-content');
+        if (contentEl) {
+            contentEl.innerHTML = buildPanelContent(msgId, meta);
+            bindPanelEvents(panelEl);
+        }
+    });
+}
+
+/**
+ * 更新场景记忆列表显示
+ */
+function updateLocationMemoryDisplay() {
+    const listEl = document.getElementById('horae-location-list');
+    if (!listEl) return;
+    
+    const locMem = horaeManager.getLocationMemory();
+    const entries = Object.entries(locMem).filter(([, info]) => !info._deleted);
+    const currentLoc = horaeManager.getLatestState()?.scene?.location || '';
+    
+    if (entries.length === 0) {
+        listEl.innerHTML = `
+            <div class="horae-empty-state">
+                <i class="fa-solid fa-map-location-dot"></i>
+                <span>${t('locations.noLocations')}</span>
+                <span style="font-size:11px;opacity:0.6;margin-top:4px;">${t('locations.noLocationsHint')}</span>
+            </div>`;
+        return;
+    }
+    
+    // 按父级分组：「酒馆·大厅」→ parent=酒馆, child=大厅
+    const SEP = /[·・\-\/\|]/;
+    const groups = {};   // { parentName: { info?, children: [{name,info}] } }
+    const standalone = []; // 无子级的独立条目
+    
+    for (const [name, info] of entries) {
+        const sepMatch = name.match(SEP);
+        if (sepMatch) {
+            const parent = name.substring(0, sepMatch.index).trim();
+            if (!groups[parent]) groups[parent] = { children: [] };
+            groups[parent].children.push({ name, info });
+            // 如果恰好也存在同名的父级条目，关联
+            if (locMem[parent]) groups[parent].info = locMem[parent];
+        } else if (groups[name]) {
+            groups[name].info = info;
+        } else {
+            // 检查是否已有子级引用
+            const hasChildren = entries.some(([n]) => n !== name && n.startsWith(name) && SEP.test(n.charAt(name.length)));
+            if (hasChildren) {
+                if (!groups[name]) groups[name] = { children: [] };
+                groups[name].info = info;
+            } else {
+                standalone.push({ name, info });
+            }
+        }
+    }
+    
+    const buildCard = (name, info, indent = false) => {
+        const isCurrent = name === currentLoc || currentLoc.includes(name) || name.includes(currentLoc);
+        const currentClass = isCurrent ? 'horae-location-current' : '';
+        const currentBadge = isCurrent ? `<span class="horae-loc-current-badge">${t('ui.currentBadge')}</span>` : '';
+        const dateStr = info.lastUpdated ? new Date(info.lastUpdated).toLocaleDateString() : '';
+        const indentClass = indent ? ' horae-loc-child' : '';
+        const displayName = indent ? name.split(SEP).pop().trim() : name;
+        return `
+            <div class="horae-location-card ${currentClass}${indentClass}" data-location-name="${escapeHtml(name)}">
+                <div class="horae-loc-header">
+                    <div class="horae-loc-name"><i class="fa-solid fa-location-dot"></i> ${escapeHtml(displayName)} ${currentBadge}</div>
+                    <div class="horae-loc-actions">
+                        <button class="horae-loc-edit" title="${t('common.edit')}"><i class="fa-solid fa-pen"></i></button>
+                        <button class="horae-loc-delete" title="${t('common.delete')}"><i class="fa-solid fa-trash"></i></button>
+                    </div>
+                </div>
+                <div class="horae-loc-desc">${info.desc || `<span class="horae-empty-hint">${t('ui.noDescription')}</span>`}</div>
+                ${dateStr ? `<div class="horae-loc-date">${dateStr}</div>` : ''}
+            </div>`;
+    };
+    
+    let html = '';
+    // 渲染有子级的分组
+    for (const [parentName, group] of Object.entries(groups)) {
+        const isParentCurrent = currentLoc.startsWith(parentName);
+        html += `<div class="horae-loc-group${isParentCurrent ? ' horae-loc-group-active' : ''}">
+            <div class="horae-loc-group-header" data-parent="${escapeHtml(parentName)}">
+                <i class="fa-solid fa-chevron-${isParentCurrent ? 'down' : 'right'} horae-loc-fold-icon"></i>
+                <i class="fa-solid fa-building"></i> <strong>${escapeHtml(parentName)}</strong>
+                <span class="horae-loc-group-count">${group.children.length + (group.info ? 1 : 0)}</span>
+            </div>
+            <div class="horae-loc-group-body" style="display:${isParentCurrent ? 'block' : 'none'};">`;
+        if (group.info) html += buildCard(parentName, group.info, false);
+        for (const child of group.children) html += buildCard(child.name, child.info, true);
+        html += '</div></div>';
+    }
+    // 渲染独立条目
+    for (const { name, info } of standalone) html += buildCard(name, info, false);
+    
+    listEl.innerHTML = html;
+    
+    // 折叠切换
+    listEl.querySelectorAll('.horae-loc-group-header').forEach(header => {
+        header.addEventListener('click', () => {
+            const body = header.nextElementSibling;
+            const icon = header.querySelector('.horae-loc-fold-icon');
+            const hidden = body.style.display === 'none';
+            body.style.display = hidden ? 'block' : 'none';
+            icon.className = `fa-solid fa-chevron-${hidden ? 'down' : 'right'} horae-loc-fold-icon`;
+        });
+    });
+    
+    listEl.querySelectorAll('.horae-loc-edit').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const name = btn.closest('.horae-location-card').dataset.locationName;
+            openLocationEditModal(name);
+        });
+    });
+    
+    listEl.querySelectorAll('.horae-loc-delete').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const name = btn.closest('.horae-location-card').dataset.locationName;
+            if (!confirm(t('confirm.deleteLocation', {name}))) return;
+            const chat = horaeManager.getChat();
+            if (chat?.[0]?.horae_meta?.locationMemory) {
+                // 标记为已删除而非直接delete，防止rebuildLocationMemory从历史消息重建
+                chat[0].horae_meta.locationMemory[name] = {
+                    ...chat[0].horae_meta.locationMemory[name],
+                    _deleted: true
+                };
+                await getContext().saveChat();
+                updateLocationMemoryDisplay();
+                showToast(t('toast.saveSuccess'), 'info');
+            }
+        });
+    });
+}
+
+/**
+ * 打开场景记忆编辑弹窗
+ */
+function openLocationEditModal(locationName) {
+    closeEditModal();
+    const locMem = horaeManager.getLocationMemory();
+    const isNew = !locationName || !locMem[locationName];
+    const existing = isNew ? { desc: '' } : locMem[locationName];
+    
+    const modalHtml = `
+        <div id="horae-edit-modal" class="horae-modal">
+            <div class="horae-modal-content">
+                <div class="horae-modal-header">
+                    <i class="fa-solid fa-map-location-dot"></i> ${isNew ? t('locations.addLocation') : t('modal.editLocation')}
+                </div>
+                <div class="horae-modal-body horae-edit-modal-body">
+                    <div class="horae-edit-field">
+                        <label>${t('label.locationNameLabel')}</label>
+                        <input type="text" id="horae-loc-edit-name" value="${escapeHtml(locationName || '')}" placeholder="${t('placeholder.locationName')}">
+                    </div>
+                    <div class="horae-edit-field">
+                        <label>${t('label.sceneDescription')}</label>
+                        <textarea id="horae-loc-edit-desc" rows="5" placeholder="${t('placeholder.locationDesc')}">${escapeHtml(existing.desc || '')}</textarea>
+                    </div>
+                </div>
+                <div class="horae-modal-footer">
+                    <button id="horae-loc-save" class="horae-btn primary">
+                        <i class="fa-solid fa-check"></i> ${t('common.save')}
+                    </button>
+                    <button id="horae-loc-cancel" class="horae-btn">
+                        <i class="fa-solid fa-xmark"></i> ${t('common.cancel')}
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    preventModalBubble();
+    
+    document.getElementById('horae-edit-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'horae-edit-modal') closeEditModal();
+    });
+    
+    document.getElementById('horae-loc-save').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const name = document.getElementById('horae-loc-edit-name').value.trim();
+        const desc = document.getElementById('horae-loc-edit-desc').value.trim();
+        if (!name) { showToast(t('toast.locationNameRequired'), 'warning'); return; }
+        
+        const chat = horaeManager.getChat();
+        if (!chat?.length) return;
+        if (!chat[0].horae_meta) chat[0].horae_meta = createEmptyMeta();
+        if (!chat[0].horae_meta.locationMemory) chat[0].horae_meta.locationMemory = {};
+        const mem = chat[0].horae_meta.locationMemory;
+        
+        const now = new Date().toISOString();
+        if (isNew) {
+            mem[name] = { desc, firstSeen: now, lastUpdated: now, _userEdited: true };
+        } else if (locationName !== name) {
+            // 改名：级联更新子级 + 记录曾用名
+            const SEP = /[·・\-\/\|]/;
+            const oldEntry = mem[locationName] || {};
+            const aliases = oldEntry._aliases || [];
+            if (!aliases.includes(locationName)) aliases.push(locationName);
+            delete mem[locationName];
+            mem[name] = { ...oldEntry, desc, lastUpdated: now, _userEdited: true, _aliases: aliases };
+            // 检测是否为父级改名，级联所有子级
+            const childKeys = Object.keys(mem).filter(k => {
+                const sepMatch = k.match(SEP);
+                return sepMatch && k.substring(0, sepMatch.index).trim() === locationName;
+            });
+            for (const childKey of childKeys) {
+                const sepMatch = childKey.match(SEP);
+                const childPart = childKey.substring(sepMatch.index);
+                const newChildKey = name + childPart;
+                const childEntry = mem[childKey];
+                const childAliases = childEntry._aliases || [];
+                if (!childAliases.includes(childKey)) childAliases.push(childKey);
+                delete mem[childKey];
+                mem[newChildKey] = { ...childEntry, lastUpdated: now, _aliases: childAliases };
+            }
+        } else {
+            mem[name] = { ...existing, desc, lastUpdated: now, _userEdited: true };
+        }
+        
+        await getContext().saveChat();
+        closeEditModal();
+        updateLocationMemoryDisplay();
+        showToast(t('toast.saveSuccess'), 'success');
+    });
+    
+    document.getElementById('horae-loc-cancel').addEventListener('click', () => closeEditModal());
+}
+
+/**
+ * 合并两个地点的场景记忆
+ */
+function openLocationMergeModal() {
+    closeEditModal();
+    const locMem = horaeManager.getLocationMemory();
+    const entries = Object.entries(locMem).filter(([, info]) => !info._deleted);
+    
+    if (entries.length < 2) {
+        showToast(t('toast.mergeMin2'), 'warning');
+        return;
+    }
+    
+    const options = entries.map(([name]) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+    
+    const modalHtml = `
+        <div id="horae-edit-modal" class="horae-modal">
+            <div class="horae-modal-content">
+                <div class="horae-modal-header">
+                    <i class="fa-solid fa-code-merge"></i> ${t('modal.mergeLocations')}
+                </div>
+                <div class="horae-modal-body horae-edit-modal-body">
+                    <div class="horae-setting-hint" style="margin-bottom: 12px;">
+                        <i class="fa-solid fa-circle-info"></i>
+                        ${t('locations.mergeLocations')}
+                    </div>
+                    <div class="horae-edit-field">
+                        <label>${t('label.mergeSource')}</label>
+                        <select id="horae-merge-source">${options}</select>
+                    </div>
+                    <div class="horae-edit-field">
+                        <label>${t('label.mergeTarget')}</label>
+                        <select id="horae-merge-target">${options}</select>
+                    </div>
+                    <div id="horae-merge-preview" class="horae-merge-preview" style="display:none;">
+                        <strong>${t('ui.mergePreviewLabel')}</strong><br><span id="horae-merge-preview-text"></span>
+                    </div>
+                </div>
+                <div class="horae-modal-footer">
+                    <button id="horae-merge-confirm" class="horae-btn primary">
+                        <i class="fa-solid fa-check"></i> ${t('common.confirm')}
+                    </button>
+                    <button id="horae-merge-cancel" class="horae-btn">
+                        <i class="fa-solid fa-xmark"></i> ${t('common.cancel')}
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    preventModalBubble();
+    
+    if (entries.length >= 2) {
+        document.getElementById('horae-merge-target').selectedIndex = 1;
+    }
+    
+    document.getElementById('horae-edit-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'horae-edit-modal') closeEditModal();
+    });
+    
+    const updatePreview = () => {
+        const source = document.getElementById('horae-merge-source').value;
+        const target = document.getElementById('horae-merge-target').value;
+        const previewEl = document.getElementById('horae-merge-preview');
+        const textEl = document.getElementById('horae-merge-preview-text');
+        
+        if (source === target) {
+            previewEl.style.display = 'block';
+            textEl.textContent = t('ui.sameSourceTarget');
+            return;
+        }
+        
+        const sourceDesc = locMem[source]?.desc || '';
+        const targetDesc = locMem[target]?.desc || '';
+        const merged = targetDesc + (targetDesc && sourceDesc ? '\n' : '') + sourceDesc;
+        previewEl.style.display = 'block';
+        textEl.textContent = t('ui.mergePreview', {source, target, desc: merged.substring(0, 100) + (merged.length > 100 ? '...' : '')});
+    };
+    
+    document.getElementById('horae-merge-source').addEventListener('change', updatePreview);
+    document.getElementById('horae-merge-target').addEventListener('change', updatePreview);
+    updatePreview();
+    
+    document.getElementById('horae-merge-confirm').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const source = document.getElementById('horae-merge-source').value;
+        const target = document.getElementById('horae-merge-target').value;
+        
+        if (source === target) {
+            showToast(t('toast.mergeSameError'), 'warning');
+            return;
+        }
+        
+        if (!confirm(t('confirm.deleteLocation', {name: source}))) return;
+        
+        const chat = horaeManager.getChat();
+        const mem = chat?.[0]?.horae_meta?.locationMemory;
+        if (!mem) return;
+        
+        const sourceDesc = mem[source]?.desc || '';
+        const targetDesc = mem[target]?.desc || '';
+        mem[target].desc = targetDesc + (targetDesc && sourceDesc ? '\n' : '') + sourceDesc;
+        mem[target].lastUpdated = new Date().toISOString();
+        delete mem[source];
+        
+        await getContext().saveChat();
+        closeEditModal();
+        updateLocationMemoryDisplay();
+        showToast(t('toast.saveSuccess'), 'success');
+    });
+    
+    document.getElementById('horae-merge-cancel').addEventListener('click', () => closeEditModal());
+}
+
+function updateTokenCounter() {
+    const el = document.getElementById('horae-token-value');
+    if (!el) return;
+    try {
+        const dataPrompt = horaeManager.generateCompactPrompt();
+        const rulesPrompt = horaeManager.generateSystemPromptAddition();
+        const combined = `${dataPrompt}\n${rulesPrompt}`;
+        const tokens = estimateTokens(combined);
+        el.textContent = `≈ ${tokens.toLocaleString()}`;
+    } catch (err) {
+        console.warn('[Horae] Token 计数失败:', err);
+        el.textContent = '--';
+    }
+}
+
+/**
+ * 滚动到指定消息（支持折叠/懒加载的消息展开跳转）
+ */
+async function scrollToMessage(messageId) {
+    let messageEl = document.querySelector(`.mes[mesid="${messageId}"]`);
+    if (messageEl) {
+        messageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        messageEl.classList.add('horae-highlight');
+        setTimeout(() => messageEl.classList.remove('horae-highlight'), 2000);
+        return;
+    }
+    // 消息不在 DOM 中（被酒馆折叠/懒加载），提示用户展开
+    if (!confirm(t('confirm.jumpToFarMessage', {id: messageId}))) return;
+    try {
+        const slashModule = await import('/scripts/slash-commands.js');
+        const exec = slashModule.executeSlashCommandsWithOptions;
+        await exec(`/go ${messageId}`);
+        await new Promise(r => setTimeout(r, 300));
+        messageEl = document.querySelector(`.mes[mesid="${messageId}"]`);
+        if (messageEl) {
+            messageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            messageEl.classList.add('horae-highlight');
+            setTimeout(() => messageEl.classList.remove('horae-highlight'), 2000);
+        } else {
+            showToast(t('toast.jumpFailed', {id: messageId}), 'warning');
+        }
+    } catch (err) {
+        console.warn('[Horae] 跳转失败:', err);
+        showToast(t('toast.jumpError', {error: err.message || 'unknown'}), 'error');
+    }
+}
+
+/** 应用顶部图标可见性 */
+function applyTopIconVisibility() {
+    const show = settings.showTopIcon !== false;
+    if (show) {
+        $('#horae_drawer').show();
+    } else {
+        // 先关闭抽屉再隐藏
+        if ($('#horae_drawer_icon').hasClass('openIcon')) {
+            $('#horae_drawer_icon').toggleClass('openIcon closedIcon');
+            $('#horae_drawer_content').toggleClass('openDrawer closedDrawer').hide();
+        }
+        $('#horae_drawer').hide();
+    }
+    // 同步两处开关
+    $('#horae-setting-show-top-icon').prop('checked', show);
+    $('#horae-ext-show-top-icon').prop('checked', show);
+}
+
+/** 应用消息面板宽度和偏移设置（底部栏 + RPG HUD 统一跟随） */
+function applyPanelWidth() {
+    const width = Math.max(50, Math.min(100, settings.panelWidth || 100));
+    const offset = Math.max(0, settings.panelOffset || 0);
+    const mw = width < 100 ? `${width}%` : '';
+    const ml = offset > 0 ? `${offset}px` : '';
+    document.querySelectorAll('.horae-message-panel, .horae-rpg-hud').forEach(el => {
+        el.style.maxWidth = mw;
+        el.style.marginLeft = ml;
+    });
+}
+
+/** 内置预设主题 */
+const BUILTIN_THEMES = {
+    'sakura': {
+        name: '樱花粉',
+        variables: {
+            '--horae-primary': '#ec4899', '--horae-primary-light': '#f472b6', '--horae-primary-dark': '#be185d',
+            '--horae-accent': '#fb923c', '--horae-success': '#34d399', '--horae-warning': '#fbbf24',
+            '--horae-danger': '#f87171', '--horae-info': '#60a5fa',
+            '--horae-bg': '#1f1018', '--horae-bg-secondary': '#2d1825', '--horae-bg-hover': '#3d2535',
+            '--horae-border': 'rgba(236, 72, 153, 0.15)', '--horae-text': '#fce7f3', '--horae-text-muted': '#d4a0b9',
+            '--horae-shadow': '0 4px 20px rgba(190, 24, 93, 0.2)'
+        }
+    },
+    'forest': {
+        name: '森林绿',
+        variables: {
+            '--horae-primary': '#059669', '--horae-primary-light': '#34d399', '--horae-primary-dark': '#047857',
+            '--horae-accent': '#fbbf24', '--horae-success': '#10b981', '--horae-warning': '#f59e0b',
+            '--horae-danger': '#ef4444', '--horae-info': '#60a5fa',
+            '--horae-bg': '#0f1a14', '--horae-bg-secondary': '#1a2e22', '--horae-bg-hover': '#2a3e32',
+            '--horae-border': 'rgba(16, 185, 129, 0.15)', '--horae-text': '#d1fae5', '--horae-text-muted': '#6ee7b7',
+            '--horae-shadow': '0 4px 20px rgba(4, 120, 87, 0.2)'
+        }
+    },
+    'ocean': {
+        name: '海洋蓝',
+        variables: {
+            '--horae-primary': '#3b82f6', '--horae-primary-light': '#60a5fa', '--horae-primary-dark': '#1d4ed8',
+            '--horae-accent': '#f59e0b', '--horae-success': '#10b981', '--horae-warning': '#f59e0b',
+            '--horae-danger': '#ef4444', '--horae-info': '#93c5fd',
+            '--horae-bg': '#0c1929', '--horae-bg-secondary': '#162a45', '--horae-bg-hover': '#1e3a5f',
+            '--horae-border': 'rgba(59, 130, 246, 0.15)', '--horae-text': '#dbeafe', '--horae-text-muted': '#93c5fd',
+            '--horae-shadow': '0 4px 20px rgba(29, 78, 216, 0.2)'
+        }
+    }
+};
+
+/** 获取当前主题对象（内置或自定义） */
+function resolveTheme(mode) {
+    if (BUILTIN_THEMES[mode]) return BUILTIN_THEMES[mode];
+    if (mode.startsWith('custom-')) {
+        const idx = parseInt(mode.split('-')[1]);
+        return (settings.customThemes || [])[idx] || null;
+    }
+    return null;
+}
+
+function isLightMode() {
+    const mode = settings.themeMode || 'dark';
+    if (mode === 'light') return true;
+    const theme = resolveTheme(mode);
+    return !!(theme && theme.isLight);
+}
+
+/** 应用主题模式（dark / light / 内置预设 / custom-{index}） */
+function applyThemeMode() {
+    const mode = settings.themeMode || 'dark';
+    const theme = resolveTheme(mode);
+    const isLight = mode === 'light' || !!(theme && theme.isLight);
+    const hasCustomVars = !!(theme && theme.variables);
+
+    // 切换 horae-light 类（日间模式需要此类激活 UI 细节样式如 checkbox 边框等）
+    const targets = [
+        document.getElementById('horae_drawer'),
+        ...document.querySelectorAll('.horae-message-panel'),
+        ...document.querySelectorAll('.horae-modal'),
+        ...document.querySelectorAll('.horae-rpg-hud')
+    ].filter(Boolean);
+    targets.forEach(el => el.classList.toggle('horae-light', isLight));
+
+    // 注入主题变量
+    let themeStyleEl = document.getElementById('horae-theme-vars');
+    if (hasCustomVars) {
+        if (!themeStyleEl) {
+            themeStyleEl = document.createElement('style');
+            themeStyleEl.id = 'horae-theme-vars';
+            document.head.appendChild(themeStyleEl);
+        }
+        const vars = Object.entries(theme.variables)
+            .map(([k, v]) => `  ${k}: ${v};`)
+            .join('\n');
+        // 日间自定义主题：必须追加 .horae-light 选择器以覆盖 style.css 中同名类的默认变量
+        const needsLightOverride = isLight && mode !== 'light';
+        const selectors = needsLightOverride
+            ? '#horae_drawer,\n#horae_drawer.horae-light,\n.horae-message-panel,\n.horae-message-panel.horae-light,\n.horae-modal,\n.horae-modal.horae-light,\n.horae-context-menu,\n.horae-context-menu.horae-light,\n.horae-rpg-hud,\n.horae-rpg-hud.horae-light,\n.horae-rpg-dice-panel,\n.horae-rpg-dice-panel.horae-light,\n.horae-progress-overlay,\n.horae-progress-overlay.horae-light'
+            : '#horae_drawer,\n.horae-message-panel,\n.horae-modal,\n.horae-context-menu,\n.horae-rpg-hud,\n.horae-rpg-dice-panel,\n.horae-progress-overlay';
+        themeStyleEl.textContent = `${selectors} {\n${vars}\n}`;
+    } else {
+        if (themeStyleEl) themeStyleEl.remove();
+    }
+
+    // 注入主题附带CSS
+    let themeCssEl = document.getElementById('horae-theme-css');
+    if (theme && theme.css) {
+        if (!themeCssEl) {
+            themeCssEl = document.createElement('style');
+            themeCssEl.id = 'horae-theme-css';
+            document.head.appendChild(themeCssEl);
+        }
+        themeCssEl.textContent = theme.css;
+    } else {
+        if (themeCssEl) themeCssEl.remove();
+    }
+}
+
+/** 注入用户自定义CSS */
+function applyCustomCSS() {
+    let styleEl = document.getElementById('horae-custom-style');
+    const css = (settings.customCSS || '').trim();
+    if (!css) {
+        if (styleEl) styleEl.remove();
+        return;
+    }
+    if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.id = 'horae-custom-style';
+        document.head.appendChild(styleEl);
+    }
+    styleEl.textContent = css;
+}
+
+/** 导出当前美化为JSON文件 */
+function exportTheme() {
+    const theme = {
+        name: '我的Horae美化',
+        author: '',
+        version: '1.0',
+        variables: {},
+        css: settings.customCSS || ''
+    };
+    // 读取当前主题变量
+    const root = document.getElementById('horae_drawer');
+    if (root) {
+        const style = getComputedStyle(root);
+        const varNames = [
+            '--horae-primary', '--horae-primary-light', '--horae-primary-dark',
+            '--horae-accent', '--horae-success', '--horae-warning', '--horae-danger', '--horae-info',
+            '--horae-bg', '--horae-bg-secondary', '--horae-bg-hover',
+            '--horae-border', '--horae-text', '--horae-text-muted',
+            '--horae-shadow', '--horae-radius', '--horae-radius-sm'
+        ];
+        varNames.forEach(name => {
+            const val = style.getPropertyValue(name).trim();
+            if (val) theme.variables[name] = val;
+        });
+    }
+    const blob = new Blob([JSON.stringify(theme, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'horae-theme.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast(t('toast.configExported'), 'info');
+}
+
+/** 导入美化JSON文件 */
+function importTheme() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        try {
+            const text = await file.text();
+            const theme = JSON.parse(text);
+            if (!theme.variables || typeof theme.variables !== 'object') {
+                showToast(t('toast.themeInvalidFile'), 'error');
+                return;
+            }
+            theme.name = theme.name || file.name.replace('.json', '');
+            if (!settings.customThemes) settings.customThemes = [];
+            settings.customThemes.push(theme);
+            saveSettings();
+            refreshThemeSelector();
+            showToast(t('toast.themeImported', {name: theme.name}), 'success');
+        } catch (err) {
+            showToast(t('toast.themeParseFailed'), 'error');
+            console.error('[Horae] 导入美化失败:', err);
+        }
+    });
+    input.click();
+}
+
+/** 刷新主题选择器下拉选项 */
+function refreshThemeSelector() {
+    const sel = document.getElementById('horae-setting-theme-mode');
+    if (!sel) return;
+    // 清除动态选项（内置预设 + 用户导入）
+    sel.querySelectorAll('option:not([value="dark"]):not([value="light"])').forEach(o => o.remove());
+    // 内置预设主题
+    for (const [key, theme] of Object.entries(BUILTIN_THEMES)) {
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = `🎨 ${theme.name}`;
+        sel.appendChild(opt);
+    }
+    // 用户导入的主题
+    const themes = settings.customThemes || [];
+    themes.forEach((theme, i) => {
+        const opt = document.createElement('option');
+        opt.value = `custom-${i}`;
+        opt.textContent = `📁 ${theme.name}`;
+        sel.appendChild(opt);
+    });
+    sel.value = settings.themeMode || 'dark';
+}
+
+/** 删除已导入的自定义主题 */
+function deleteCustomTheme(index) {
+    const themes = settings.customThemes || [];
+    if (!themes[index]) return;
+    if (!confirm(t('confirm.deleteTheme', {name: themes[index].name}))) return;
+    const currentMode = settings.themeMode || 'dark';
+    themes.splice(index, 1);
+    settings.customThemes = themes;
+    // 如果删除的是当前使用的主题，回退暗色
+    if (currentMode === `custom-${index}` || (currentMode.startsWith('custom-') && parseInt(currentMode.split('-')[1]) >= index)) {
+        settings.themeMode = 'dark';
+        applyThemeMode();
+    }
+    saveSettings();
+    refreshThemeSelector();
+    showToast(t('toast.saveSuccess'), 'info');
+}
+
+// ============================================
+// 自助美化工具 (Theme Designer)
+// ============================================
+
+function _tdHslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => {
+        const k = (n + h / 30) % 12;
+        const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+        return Math.round(255 * Math.max(0, Math.min(1, c))).toString(16).padStart(2, '0');
+    };
+    return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+function _tdHexToHsl(hex) {
+    hex = hex.replace('#', '');
+    if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
+    const r = parseInt(hex.slice(0, 2), 16) / 255;
+    const g = parseInt(hex.slice(2, 4), 16) / 255;
+    const b = parseInt(hex.slice(4, 6), 16) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0, s = 0, l = (max + min) / 2;
+    if (max !== min) {
+        const d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+        else if (max === g) h = ((b - r) / d + 2) / 6;
+        else h = ((r - g) / d + 4) / 6;
+    }
+    return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+
+function _tdHexToRgb(hex) {
+    hex = hex.replace('#', '');
+    return { r: parseInt(hex.slice(0, 2), 16), g: parseInt(hex.slice(2, 4), 16), b: parseInt(hex.slice(4, 6), 16) };
+}
+
+function _tdParseColorHsl(str) {
+    if (!str) return { h: 265, s: 84, l: 58 };
+    str = str.trim();
+    if (str.startsWith('#')) return _tdHexToHsl(str);
+    const hm = str.match(/hsla?\(\s*(\d+)\s*,\s*(\d+)%?\s*,\s*(\d+)%?/);
+    if (hm) return { h: +hm[1], s: +hm[2], l: +hm[3] };
+    const rm = str.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (rm) return _tdHexToHsl('#' + [rm[1], rm[2], rm[3]].map(n => parseInt(n).toString(16).padStart(2, '0')).join(''));
+    return { h: 265, s: 84, l: 58 };
+}
+
+function _tdGenerateVars(hue, sat, brightness, accentHex, colorLight) {
+    const isDark = brightness <= 50;
+    const s = Math.max(15, sat);
+    const pL = colorLight || 50;
+    const v = {};
+    if (isDark) {
+        const bgL = 6 + (brightness / 50) * 10;
+        v['--horae-primary'] = _tdHslToHex(hue, s, pL);
+        v['--horae-primary-light'] = _tdHslToHex(hue, Math.max(s - 12, 25), Math.min(pL + 16, 90));
+        v['--horae-primary-dark'] = _tdHslToHex(hue, Math.min(s + 5, 100), Math.max(pL - 14, 10));
+        v['--horae-bg'] = _tdHslToHex(hue, Math.min(s, 22), bgL);
+        v['--horae-bg-secondary'] = _tdHslToHex(hue, Math.min(s, 16), bgL + 5);
+        v['--horae-bg-hover'] = _tdHslToHex(hue, Math.min(s, 14), bgL + 10);
+        v['--horae-border'] = `rgba(255,255,255,0.1)`;
+        v['--horae-text'] = _tdHslToHex(hue, 8, 90);
+        v['--horae-text-muted'] = _tdHslToHex(hue, 6, 63);
+        v['--horae-shadow'] = `0 4px 20px rgba(0,0,0,0.3)`;
+    } else {
+        const bgL = 92 + ((brightness - 50) / 50) * 5;
+        v['--horae-primary'] = _tdHslToHex(hue, s, pL);
+        v['--horae-primary-light'] = _tdHslToHex(hue, s, Math.max(pL - 8, 10));
+        v['--horae-primary-dark'] = _tdHslToHex(hue, Math.max(s - 12, 25), Math.min(pL + 14, 85));
+        v['--horae-bg'] = _tdHslToHex(hue, Math.min(s, 12), bgL);
+        v['--horae-bg-secondary'] = _tdHslToHex(hue, Math.min(s, 10), bgL - 4);
+        v['--horae-bg-hover'] = _tdHslToHex(hue, Math.min(s, 10), bgL - 8);
+        v['--horae-border'] = `rgba(0,0,0,0.12)`;
+        v['--horae-text'] = _tdHslToHex(hue, 8, 12);
+        v['--horae-text-muted'] = _tdHslToHex(hue, 5, 38);
+        v['--horae-shadow'] = `0 4px 20px rgba(0,0,0,0.08)`;
+    }
+    if (accentHex) v['--horae-accent'] = accentHex;
+    v['--horae-success'] = '#10b981';
+    v['--horae-warning'] = '#f59e0b';
+    v['--horae-danger'] = '#ef4444';
+    v['--horae-info'] = '#3b82f6';
+    return v;
+}
+
+function _tdBuildImageCSS(images, opacities, bgHex, drawerBg) {
+    const parts = [];
+    // 顶部图标（#horae_drawer）
+    if (images.drawer && bgHex) {
+        const c = _tdHexToRgb(drawerBg || bgHex);
+        const a = (1 - (opacities.drawer || 30) / 100).toFixed(2);
+        parts.push(`#horae_drawer {
+  background-image: linear-gradient(rgba(${c.r},${c.g},${c.b},${a}), rgba(${c.r},${c.g},${c.b},${a})), url('${images.drawer}') !important;
+  background-size: auto, cover !important;
+  background-position: center, center !important;
+  background-repeat: no-repeat, no-repeat !important;
+}`);
+    }
+    // 抽屉头部图片
+    if (images.header) {
+        parts.push(`#horae_drawer .drawer-header {
+  background-image: url('${images.header}') !important;
+  background-size: cover !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+}`);
+    }
+    // 抽屉背景图片
+    const bodyBg = drawerBg || bgHex;
+    if (images.body && bodyBg) {
+        const c = _tdHexToRgb(bodyBg);
+        const a = (1 - (opacities.body || 30) / 100).toFixed(2);
+        parts.push(`.horae-tab-contents {
+  background-image: linear-gradient(rgba(${c.r},${c.g},${c.b},${a}), rgba(${c.r},${c.g},${c.b},${a})), url('${images.body}') !important;
+  background-size: auto, cover !important;
+  background-position: center, center !important;
+  background-repeat: no-repeat, no-repeat !important;
+}`);
+    } else if (drawerBg) {
+        parts.push(`.horae-tab-contents { background-color: ${drawerBg} !important; }`);
+    }
+    // 底部消息栏图片 — 仅作用于收缩的 toggle 条，展开内容不叠加图片
+    if (images.panel && bgHex) {
+        const c = _tdHexToRgb(bgHex);
+        const a = (1 - (opacities.panel || 30) / 100).toFixed(2);
+        parts.push(`.horae-message-panel > .horae-panel-toggle {
+  background-image: linear-gradient(rgba(${c.r},${c.g},${c.b},${a}), rgba(${c.r},${c.g},${c.b},${a})), url('${images.panel}') !important;
+  background-size: auto, cover !important;
+  background-position: center, center !important;
+  background-repeat: no-repeat, no-repeat !important;
+}`);
+    }
+    return parts.join('\n');
+}
+
+function openThemeDesigner() {
+    document.querySelector('.horae-theme-designer')?.remove();
+
+    const drawer = document.getElementById('horae_drawer');
+    const cs = drawer ? getComputedStyle(drawer) : null;
+    const priStr = cs?.getPropertyValue('--horae-primary').trim() || '#7c3aed';
+    const accStr = cs?.getPropertyValue('--horae-accent').trim() || '#f59e0b';
+    const initHsl = _tdParseColorHsl(priStr);
+
+    // 尝试从当前自定义主题恢复全部设置
+    let savedImages = { drawer: '', header: '', body: '', panel: '' };
+    let savedImgOp = { drawer: 30, header: 50, body: 30, panel: 30 };
+    let savedName = '', savedAuthor = '', savedDrawerBg = '';
+    let savedDesigner = null;
+    const curTheme = resolveTheme(settings.themeMode || 'dark');
+    if (curTheme) {
+        if (curTheme.images) savedImages = { ...savedImages, ...curTheme.images };
+        if (curTheme.imageOpacity) savedImgOp = { ...savedImgOp, ...curTheme.imageOpacity };
+        if (curTheme.name) savedName = curTheme.name;
+        if (curTheme.author) savedAuthor = curTheme.author;
+        if (curTheme.drawerBg) savedDrawerBg = curTheme.drawerBg;
+        if (curTheme._designerState) savedDesigner = curTheme._designerState;
+    }
+
+    const st = {
+        hue: savedDesigner?.hue ?? initHsl.h,
+        sat: savedDesigner?.sat ?? initHsl.s,
+        colorLight: savedDesigner?.colorLight ?? initHsl.l,
+        bright: savedDesigner?.bright ?? ((isLightMode()) ? 70 : 25),
+        accent: savedDesigner?.accent ?? (accStr.startsWith('#') ? accStr : '#f59e0b'),
+        images: savedImages,
+        imgOp: savedImgOp,
+        drawerBg: savedDrawerBg,
+        rpgColor: savedDesigner?.rpgColor ?? '#000000',
+        rpgOpacity: savedDesigner?.rpgOpacity ?? 85,
+        diceColor: savedDesigner?.diceColor ?? '#1a1a2e',
+        diceOpacity: savedDesigner?.diceOpacity ?? 15,
+        radarColor: savedDesigner?.radarColor ?? '',
+        radarLabel: savedDesigner?.radarLabel ?? '',
+        overrides: {}
+    };
+
+    const abortCtrl = new AbortController();
+    const sig = abortCtrl.signal;
+
+    const imgHtml = (key, label) => {
+        const url = st.images[key] || '';
+        const op = st.imgOp[key];
+        return `<div class="htd-img-group">
+        <div class="htd-img-label">${label}</div>
+        <input type="text" id="htd-img-${key}" class="htd-input" placeholder="${t('placeholder.imageUrl')}" value="${escapeHtml(url)}">
+        <div class="htd-img-ctrl"><span>${t('ui.visibility')} <em id="htd-imgop-${key}">${op}</em>%</span>
+            <input type="range" class="htd-slider" id="htd-imgsl-${key}" min="5" max="100" value="${op}"></div>
+        <img id="htd-imgpv-${key}" class="htd-img-preview" ${url ? `src="${escapeHtml(url)}"` : 'style="display:none;"'}>
+    </div>`;
+    };
+
+    const modal = document.createElement('div');
+    modal.className = 'horae-modal horae-theme-designer' + (isLightMode() ? ' horae-light' : '');
+    modal.innerHTML = `
+    <div class="horae-modal-content htd-content">
+        <div class="htd-header"><i class="fa-solid fa-paint-roller"></i> ${t('ui.themeDesignerTitle')}</div>
+        <div class="htd-body">
+            <div class="htd-section">
+                <div class="htd-section-title">${t('ui.quickColor')}</div>
+                <div class="htd-field">
+                    <span class="htd-label">${t('ui.hue')}</span>
+                    <div class="htd-hue-bar" id="htd-hue-bar"><div class="htd-hue-ind" id="htd-hue-ind"></div></div>
+                </div>
+                <div class="htd-field">
+                    <span class="htd-label">${t('ui.saturation')} <em id="htd-satv">${st.sat}</em>%</span>
+                    <input type="range" class="htd-slider" id="htd-sat" min="10" max="100" value="${st.sat}">
+                </div>
+                <div class="htd-field">
+                    <span class="htd-label">${t('ui.brightness')} <em id="htd-clv">${st.colorLight}</em></span>
+                    <input type="range" class="htd-slider htd-colorlight" id="htd-cl" min="15" max="85" value="${st.colorLight}">
+                </div>
+                <div class="htd-field">
+                    <span class="htd-label">${t('ui.dayNight')} <em id="htd-briv">${st.bright <= 50 ? t('ui.night') : t('ui.day')}</em></span>
+                    <input type="range" class="htd-slider htd-daynight" id="htd-bri" min="0" max="100" value="${st.bright}">
+                </div>
+                <div class="htd-field">
+                    <span class="htd-label">${t('ui.accentColor')}</span>
+                    <div class="htd-color-row">
+                        <input type="color" id="htd-accent" value="${st.accent}" class="htd-cpick">
+                        <span class="htd-hex" id="htd-accent-hex">${st.accent}</span>
+                    </div>
+                </div>
+                <div class="htd-swatches" id="htd-swatches"></div>
+            </div>
+
+            <div class="htd-section">
+                <div class="htd-section-title htd-toggle" id="htd-fine-t">
+                    <i class="fa-solid fa-sliders"></i> ${t('ui.fineColor')}
+                    <i class="fa-solid fa-chevron-down htd-arrow"></i>
+                </div>
+                <div id="htd-fine-body" style="display:none;"></div>
+            </div>
+
+            <div class="htd-section">
+                <div class="htd-section-title htd-toggle" id="htd-img-t">
+                    <i class="fa-solid fa-image"></i> ${t('ui.decorImages')}
+                    <i class="fa-solid fa-chevron-down htd-arrow"></i>
+                </div>
+                <div id="htd-imgs-section" style="display:none;">
+                    ${imgHtml('drawer', t('ui.topIcon'))}
+                    ${imgHtml('header', t('ui.drawerHeader'))}
+                    ${imgHtml('body', t('ui.drawerBody'))}
+                    <div class="htd-img-group">
+                        <div class="htd-img-label">${t('ui.drawerBgColor')}</div>
+                        <div class="htd-field">
+                            <span class="htd-label"><em id="htd-dbg-hex">${st.drawerBg || t('ui.followTheme')}</em></span>
+                            <div class="htd-color-row">
+                                <input type="color" id="htd-dbg" value="${st.drawerBg || '#2d2d3c'}" class="htd-cpick">
+                                <button class="horae-btn" id="htd-dbg-clear" style="font-size:10px;padding:2px 8px;">${t('ui.clearBtn')}</button>
+                            </div>
+                        </div>
+                    </div>
+                    ${imgHtml('panel', t('ui.bottomPanel'))}
+                </div>
+            </div>
+
+            <div class="htd-section">
+                <div class="htd-section-title htd-toggle" id="htd-rpg-t">
+                    <i class="fa-solid fa-shield-halved"></i> ${t('ui.rpgStatusBar')}
+                    <i class="fa-solid fa-chevron-down htd-arrow"></i>
+                </div>
+                <div id="htd-rpg-section" style="display:none;">
+                    <div class="htd-field">
+                        <span class="htd-label">${t('ui.backgroundColor')}</span>
+                        <div class="htd-color-row">
+                            <input type="color" id="htd-rpg-color" value="${st.rpgColor}" class="htd-cpick">
+                            <span class="htd-hex" id="htd-rpg-color-hex">${st.rpgColor}</span>
+                        </div>
+                    </div>
+                    <div class="htd-field">
+                        <span class="htd-label">${t('ui.opacityLabel')} <em id="htd-rpg-opv">${st.rpgOpacity}</em>%</span>
+                        <input type="range" class="htd-slider" id="htd-rpg-op" min="0" max="100" value="${st.rpgOpacity}">
+                    </div>
+                </div>
+            </div>
+
+            <div class="htd-section">
+                <div class="htd-section-title htd-toggle" id="htd-dice-t">
+                    <i class="fa-solid fa-dice-d20"></i> ${t('ui.dicePanel')}
+                    <i class="fa-solid fa-chevron-down htd-arrow"></i>
+                </div>
+                <div id="htd-dice-section" style="display:none;">
+                    <div class="htd-field">
+                        <span class="htd-label">${t('ui.backgroundColor')}</span>
+                        <div class="htd-color-row">
+                            <input type="color" id="htd-dice-color" value="${st.diceColor}" class="htd-cpick">
+                            <span class="htd-hex" id="htd-dice-color-hex">${st.diceColor}</span>
+                        </div>
+                    </div>
+                    <div class="htd-field">
+                        <span class="htd-label">${t('ui.visibility')} <em id="htd-dice-opv">${st.diceOpacity}</em>%</span>
+                        <input type="range" class="htd-slider" id="htd-dice-op" min="0" max="100" value="${st.diceOpacity}">
+                    </div>
+                </div>
+            </div>
+
+            <div class="htd-section">
+                <div class="htd-section-title htd-toggle" id="htd-radar-t">
+                    <i class="fa-solid fa-chart-simple"></i> ${t('ui.radarChart')}
+                    <i class="fa-solid fa-chevron-down htd-arrow"></i>
+                </div>
+                <div id="htd-radar-section" style="display:none;">
+                    <div class="htd-field">
+                        <span class="htd-label">${t('ui.dataColor')} <em style="opacity:.5">${t('ui.emptyFollowTheme')}</em></span>
+                        <div class="htd-color-row">
+                            <input type="color" id="htd-radar-color" value="${st.radarColor || priStr}" class="htd-cpick">
+                            <span class="htd-hex" id="htd-radar-color-hex">${st.radarColor || t('ui.followTheme')}</span>
+                            <button class="horae-btn" id="htd-radar-color-clear" style="font-size:10px;padding:2px 8px;">${t('ui.clearBtn')}</button>
+                        </div>
+                    </div>
+                    <div class="htd-field">
+                        <span class="htd-label">${t('ui.labelColor')} <em style="opacity:.5">${t('ui.emptyFollowText')}</em></span>
+                        <div class="htd-color-row">
+                            <input type="color" id="htd-radar-label" value="${st.radarLabel || '#e2e8f0'}" class="htd-cpick">
+                            <span class="htd-hex" id="htd-radar-label-hex">${st.radarLabel || t('ui.followText')}</span>
+                            <button class="horae-btn" id="htd-radar-label-clear" style="font-size:10px;padding:2px 8px;">${t('ui.clearBtn')}</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="htd-section htd-save-sec">
+                <div class="htd-field"><span class="htd-label">${t('label.name')}</span><input type="text" id="htd-name" class="htd-input" placeholder="${t('placeholder.themeName')}" value="${escapeHtml(savedName)}"></div>
+                <div class="htd-field"><span class="htd-label">${t('ui.authorLabel')}</span><input type="text" id="htd-author" class="htd-input" placeholder="${t('placeholder.anonymous')}" value="${escapeHtml(savedAuthor)}"></div>
+                <div class="htd-btn-row">
+                    <button class="horae-btn primary" id="htd-save"><i class="fa-solid fa-floppy-disk"></i> ${t('common.save')}</button>
+                    <button class="horae-btn" id="htd-export"><i class="fa-solid fa-file-export"></i> ${t('common.export')}</button>
+                    <button class="horae-btn" id="htd-reset"><i class="fa-solid fa-rotate-left"></i> ${t('common.reset')}</button>
+                    <button class="horae-btn" id="htd-cancel"><i class="fa-solid fa-xmark"></i> ${t('common.cancel')}</button>
+                </div>
+            </div>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+    preventModalBubble(modal);
+
+    const hueBar = modal.querySelector('#htd-hue-bar');
+    const hueInd = modal.querySelector('#htd-hue-ind');
+    hueInd.style.left = `${(st.hue / 360) * 100}%`;
+    hueInd.style.background = `hsl(${st.hue}, 100%, 50%)`;
+
+    // ---- Live preview ----
+    function update() {
+        const base = _tdGenerateVars(st.hue, st.sat, st.bright, st.accent, st.colorLight);
+        const vars = { ...base, ...st.overrides };
+
+        // RPG HUD 背景变量（透明度：100=全透明, 0=不透明）
+        if (st.rpgColor) {
+            const rc = _tdHexToRgb(st.rpgColor);
+            const ra = (1 - (st.rpgOpacity ?? 85) / 100).toFixed(2);
+            vars['--horae-rpg-bg'] = `rgba(${rc.r},${rc.g},${rc.b},${ra})`;
+        }
+        // 骰子面板背景变量
+        if (st.diceColor) {
+            const dc = _tdHexToRgb(st.diceColor);
+            const da = (1 - (st.diceOpacity ?? 15) / 100).toFixed(2);
+            vars['--horae-dice-bg'] = `rgba(${dc.r},${dc.g},${dc.b},${da})`;
+        }
+        // 雷达图颜色变量
+        if (st.radarColor) vars['--horae-radar-color'] = st.radarColor;
+        if (st.radarLabel) vars['--horae-radar-label'] = st.radarLabel;
+
+        let previewEl = document.getElementById('horae-designer-preview');
+        if (!previewEl) { previewEl = document.createElement('style'); previewEl.id = 'horae-designer-preview'; document.head.appendChild(previewEl); }
+        const cssLines = Object.entries(vars).map(([k, v]) => `  ${k}: ${v} !important;`).join('\n');
+        previewEl.textContent = `#horae_drawer, .horae-message-panel, .horae-modal, .horae-context-menu, .horae-rpg-hud, .horae-rpg-dice-panel, .horae-progress-overlay {\n${cssLines}\n}`;
+
+        const isLight = st.bright > 50;
+        drawer?.classList.toggle('horae-light', isLight);
+        modal.classList.toggle('horae-light', isLight);
+        document.querySelectorAll('.horae-message-panel').forEach(p => p.classList.toggle('horae-light', isLight));
+        document.querySelectorAll('.horae-rpg-hud').forEach(h => h.classList.toggle('horae-light', isLight));
+        document.querySelectorAll('.horae-rpg-dice-panel').forEach(d => d.classList.toggle('horae-light', isLight));
+
+        let imgEl = document.getElementById('horae-designer-images');
+        const imgCSS = _tdBuildImageCSS(st.images, st.imgOp, vars['--horae-bg'], st.drawerBg);
+        if (imgCSS) {
+            if (!imgEl) { imgEl = document.createElement('style'); imgEl.id = 'horae-designer-images'; document.head.appendChild(imgEl); }
+            imgEl.textContent = imgCSS;
+        } else { imgEl?.remove(); }
+
+        const sw = modal.querySelector('#htd-swatches');
+        const swKeys = ['--horae-primary', '--horae-primary-light', '--horae-primary-dark', '--horae-accent',
+            '--horae-bg', '--horae-bg-secondary', '--horae-bg-hover', '--horae-text', '--horae-text-muted'];
+        sw.innerHTML = swKeys.map(k =>
+            `<div class="htd-swatch" style="background:${vars[k]}" title="${k.replace('--horae-', '')}: ${vars[k]}"></div>`
+        ).join('');
+
+        const fineBody = modal.querySelector('#htd-fine-body');
+        if (fineBody.style.display !== 'none') {
+            fineBody.querySelectorAll('.htd-fine-cpick').forEach(inp => {
+                const vn = inp.dataset.vn;
+                if (!st.overrides[vn] && vars[vn]?.startsWith('#')) {
+                    inp.value = vars[vn];
+                    inp.nextElementSibling.textContent = vars[vn];
+                }
+            });
+        }
+    }
+
+    // ---- Hue bar drag ----
+    let hueDrag = false;
+    function onHue(e) {
+        const r = hueBar.getBoundingClientRect();
+        const cx = e.touches ? e.touches[0].clientX : e.clientX;
+        const x = Math.max(0, Math.min(r.width, cx - r.left));
+        st.hue = Math.round((x / r.width) * 360);
+        hueInd.style.left = `${(st.hue / 360) * 100}%`;
+        hueInd.style.background = `hsl(${st.hue}, 100%, 50%)`;
+        st.overrides = {};
+        update();
+    }
+    hueBar.addEventListener('mousedown', e => { hueDrag = true; onHue(e); }, { signal: sig });
+    hueBar.addEventListener('touchstart', e => { hueDrag = true; onHue(e); }, { signal: sig, passive: true });
+    document.addEventListener('mousemove', e => { if (hueDrag) onHue(e); }, { signal: sig });
+    document.addEventListener('touchmove', e => { if (hueDrag) onHue(e); }, { signal: sig, passive: true });
+    document.addEventListener('mouseup', () => hueDrag = false, { signal: sig, capture: true });
+    document.addEventListener('touchend', () => hueDrag = false, { signal: sig, capture: true });
+
+    // ---- Sliders ----
+    modal.querySelector('#htd-sat').addEventListener('input', function () {
+        st.sat = +this.value; modal.querySelector('#htd-satv').textContent = st.sat;
+        st.overrides = {};
+        update();
+    }, { signal: sig });
+
+    modal.querySelector('#htd-cl').addEventListener('input', function () {
+        st.colorLight = +this.value; modal.querySelector('#htd-clv').textContent = st.colorLight;
+        st.overrides = {};
+        update();
+    }, { signal: sig });
+
+    modal.querySelector('#htd-bri').addEventListener('input', function () {
+        st.bright = +this.value;
+        modal.querySelector('#htd-briv').textContent = st.bright <= 50 ? t('ui.night') : t('ui.day');
+        st.overrides = {};
+        update();
+    }, { signal: sig });
+
+    modal.querySelector('#htd-accent').addEventListener('input', function () {
+        st.accent = this.value;
+        modal.querySelector('#htd-accent-hex').textContent = this.value;
+        update();
+    }, { signal: sig });
+
+    // ---- Collapsible ----
+    modal.querySelector('#htd-fine-t').addEventListener('click', () => {
+        const body = modal.querySelector('#htd-fine-body');
+        const show = body.style.display === 'none';
+        body.style.display = show ? 'block' : 'none';
+        if (show) buildFine();
+    }, { signal: sig });
+    modal.querySelector('#htd-img-t').addEventListener('click', () => {
+        const sec = modal.querySelector('#htd-imgs-section');
+        sec.style.display = sec.style.display === 'none' ? 'block' : 'none';
+    }, { signal: sig });
+
+    // ---- Fine pickers ----
+    const FINE_VARS = [
+        ['--horae-primary', t('ui.primaryColor')], ['--horae-primary-light', t('ui.primaryLight')], ['--horae-primary-dark', t('ui.primaryDark')],
+        ['--horae-accent', t('ui.accentColor')], ['--horae-success', t('ui.successColor')], ['--horae-warning', t('ui.warningColor')],
+        ['--horae-danger', t('ui.dangerColor')], ['--horae-info', t('ui.infoColor')],
+        ['--horae-bg', t('ui.bgColor')], ['--horae-bg-secondary', t('ui.bgSecondary')], ['--horae-bg-hover', t('ui.bgHover')],
+        ['--horae-text', 'Text'], ['--horae-text-muted', 'Text Muted']
+    ];
+    function buildFine() {
+        const c = modal.querySelector('#htd-fine-body');
+        const base = _tdGenerateVars(st.hue, st.sat, st.bright, st.accent, st.colorLight);
+        const vars = { ...base, ...st.overrides };
+        c.innerHTML = FINE_VARS.map(([vn, label]) => {
+            const val = vars[vn] || '#888888';
+            const hex = val.startsWith('#') ? val : '#888888';
+            return `<div class="htd-fine-row"><span>${label}</span>
+                <input type="color" class="htd-fine-cpick" data-vn="${vn}" value="${hex}">
+                <span class="htd-fine-hex">${val}</span></div>`;
+        }).join('');
+        c.querySelectorAll('.htd-fine-cpick').forEach(inp => {
+            inp.addEventListener('input', () => {
+                st.overrides[inp.dataset.vn] = inp.value;
+                inp.nextElementSibling.textContent = inp.value;
+                update();
+            }, { signal: sig });
+        });
+    }
+
+    // ---- Image inputs ----
+    ['drawer', 'header', 'body', 'panel'].forEach(key => {
+        const urlIn = modal.querySelector(`#htd-img-${key}`);
+        const opSl = modal.querySelector(`#htd-imgsl-${key}`);
+        const pv = modal.querySelector(`#htd-imgpv-${key}`);
+        const opV = modal.querySelector(`#htd-imgop-${key}`);
+        pv.onerror = () => pv.style.display = 'none';
+        pv.onload = () => pv.style.display = 'block';
+        urlIn.addEventListener('input', () => {
+            st.images[key] = urlIn.value.trim();
+            if (st.images[key]) pv.src = st.images[key]; else pv.style.display = 'none';
+            update();
+        }, { signal: sig });
+        opSl.addEventListener('input', () => {
+            st.imgOp[key] = +opSl.value;
+            opV.textContent = opSl.value;
+            update();
+        }, { signal: sig });
+    });
+
+    // ---- Drawer bg color ----
+    modal.querySelector('#htd-dbg').addEventListener('input', function () {
+        st.drawerBg = this.value;
+        modal.querySelector('#htd-dbg-hex').textContent = this.value;
+        update();
+    }, { signal: sig });
+    modal.querySelector('#htd-dbg-clear').addEventListener('click', () => {
+        st.drawerBg = '';
+        modal.querySelector('#htd-dbg-hex').textContent = t('ui.followTheme');
+        update();
+    }, { signal: sig });
+
+    // ---- RPG 状态栏 ----
+    modal.querySelector('#htd-rpg-t').addEventListener('click', () => {
+        const sec = modal.querySelector('#htd-rpg-section');
+        sec.style.display = sec.style.display === 'none' ? 'block' : 'none';
+    }, { signal: sig });
+    modal.querySelector('#htd-rpg-color').addEventListener('input', function () {
+        st.rpgColor = this.value;
+        modal.querySelector('#htd-rpg-color-hex').textContent = this.value;
+        update();
+    }, { signal: sig });
+    modal.querySelector('#htd-rpg-op').addEventListener('input', function () {
+        st.rpgOpacity = +this.value;
+        modal.querySelector('#htd-rpg-opv').textContent = this.value;
+        update();
+    }, { signal: sig });
+
+    // ---- 骰子面板 ----
+    modal.querySelector('#htd-dice-t').addEventListener('click', () => {
+        const sec = modal.querySelector('#htd-dice-section');
+        sec.style.display = sec.style.display === 'none' ? 'block' : 'none';
+    }, { signal: sig });
+    modal.querySelector('#htd-dice-color').addEventListener('input', function () {
+        st.diceColor = this.value;
+        modal.querySelector('#htd-dice-color-hex').textContent = this.value;
+        update();
+    }, { signal: sig });
+    modal.querySelector('#htd-dice-op').addEventListener('input', function () {
+        st.diceOpacity = +this.value;
+        modal.querySelector('#htd-dice-opv').textContent = this.value;
+        update();
+    }, { signal: sig });
+
+    // ---- 雷达图 ----
+    modal.querySelector('#htd-radar-t').addEventListener('click', () => {
+        const sec = modal.querySelector('#htd-radar-section');
+        sec.style.display = sec.style.display === 'none' ? 'block' : 'none';
+    }, { signal: sig });
+    modal.querySelector('#htd-radar-color').addEventListener('input', function () {
+        st.radarColor = this.value;
+        modal.querySelector('#htd-radar-color-hex').textContent = this.value;
+        update();
+    }, { signal: sig });
+    modal.querySelector('#htd-radar-color-clear').addEventListener('click', () => {
+        st.radarColor = '';
+        modal.querySelector('#htd-radar-color-hex').textContent = t('ui.followTheme');
+        update();
+    }, { signal: sig });
+    modal.querySelector('#htd-radar-label').addEventListener('input', function () {
+        st.radarLabel = this.value;
+        modal.querySelector('#htd-radar-label-hex').textContent = this.value;
+        update();
+    }, { signal: sig });
+    modal.querySelector('#htd-radar-label-clear').addEventListener('click', () => {
+        st.radarLabel = '';
+        modal.querySelector('#htd-radar-label-hex').textContent = t('ui.followText');
+        update();
+    }, { signal: sig });
+
+    // ---- Close ----
+    function closeDesigner() {
+        abortCtrl.abort();
+        document.getElementById('horae-designer-preview')?.remove();
+        document.getElementById('horae-designer-images')?.remove();
+        modal.remove();
+        applyThemeMode();
+    }
+    modal.querySelector('#htd-cancel').addEventListener('click', closeDesigner, { signal: sig });
+    modal.addEventListener('click', e => { if (e.target === modal) closeDesigner(); }, { signal: sig });
+
+    // ---- Save ----
+    modal.querySelector('#htd-save').addEventListener('click', () => {
+        const name = modal.querySelector('#htd-name').value.trim() || t('ui.customThemeName');
+        const author = modal.querySelector('#htd-author').value.trim() || '';
+        const base = _tdGenerateVars(st.hue, st.sat, st.bright, st.accent, st.colorLight);
+        const vars = { ...base, ...st.overrides };
+        if (st.rpgColor) {
+            const rc = _tdHexToRgb(st.rpgColor);
+            const ra = (1 - (st.rpgOpacity ?? 85) / 100).toFixed(2);
+            vars['--horae-rpg-bg'] = `rgba(${rc.r},${rc.g},${rc.b},${ra})`;
+        }
+        if (st.diceColor) {
+            const dc = _tdHexToRgb(st.diceColor);
+            const da = (1 - (st.diceOpacity ?? 15) / 100).toFixed(2);
+            vars['--horae-dice-bg'] = `rgba(${dc.r},${dc.g},${dc.b},${da})`;
+        }
+        if (st.radarColor) vars['--horae-radar-color'] = st.radarColor;
+        if (st.radarLabel) vars['--horae-radar-label'] = st.radarLabel;
+        const theme = {
+            name, author, version: '1.0', variables: vars,
+            images: { ...st.images }, imageOpacity: { ...st.imgOp },
+            drawerBg: st.drawerBg,
+            isLight: st.bright > 50,
+            _designerState: { hue: st.hue, sat: st.sat, colorLight: st.colorLight, bright: st.bright, accent: st.accent, rpgColor: st.rpgColor, rpgOpacity: st.rpgOpacity, diceColor: st.diceColor, diceOpacity: st.diceOpacity, radarColor: st.radarColor, radarLabel: st.radarLabel },
+            css: _tdBuildImageCSS(st.images, st.imgOp, vars['--horae-bg'], st.drawerBg)
+        };
+        if (!settings.customThemes) settings.customThemes = [];
+        settings.customThemes.push(theme);
+        settings.themeMode = `custom-${settings.customThemes.length - 1}`;
+        abortCtrl.abort();
+        document.getElementById('horae-designer-preview')?.remove();
+        document.getElementById('horae-designer-images')?.remove();
+        modal.remove();
+        saveSettings();
+        applyThemeMode();
+        refreshThemeSelector();
+        showToast(t('toast.themeSaved', {name}), 'success');
+    }, { signal: sig });
+
+    // ---- Export ----
+    modal.querySelector('#htd-export').addEventListener('click', () => {
+        const name = modal.querySelector('#htd-name').value.trim() || t('ui.customThemeName');
+        const author = modal.querySelector('#htd-author').value.trim() || '';
+        const base = _tdGenerateVars(st.hue, st.sat, st.bright, st.accent, st.colorLight);
+        const vars = { ...base, ...st.overrides };
+        if (st.rpgColor) {
+            const rc = _tdHexToRgb(st.rpgColor);
+            const ra = (1 - (st.rpgOpacity ?? 85) / 100).toFixed(2);
+            vars['--horae-rpg-bg'] = `rgba(${rc.r},${rc.g},${rc.b},${ra})`;
+        }
+        if (st.diceColor) {
+            const dc = _tdHexToRgb(st.diceColor);
+            const da = (1 - (st.diceOpacity ?? 15) / 100).toFixed(2);
+            vars['--horae-dice-bg'] = `rgba(${dc.r},${dc.g},${dc.b},${da})`;
+        }
+        if (st.radarColor) vars['--horae-radar-color'] = st.radarColor;
+        if (st.radarLabel) vars['--horae-radar-label'] = st.radarLabel;
+        const theme = {
+            name, author, version: '1.0', variables: vars,
+            images: { ...st.images }, imageOpacity: { ...st.imgOp },
+            drawerBg: st.drawerBg,
+            isLight: st.bright > 50,
+            _designerState: { hue: st.hue, sat: st.sat, colorLight: st.colorLight, bright: st.bright, accent: st.accent, rpgColor: st.rpgColor, rpgOpacity: st.rpgOpacity, diceColor: st.diceColor, diceOpacity: st.diceOpacity, radarColor: st.radarColor, radarLabel: st.radarLabel },
+            css: _tdBuildImageCSS(st.images, st.imgOp, vars['--horae-bg'], st.drawerBg)
+        };
+        const blob = new Blob([JSON.stringify(theme, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = `horae-${name}.json`; a.click();
+        URL.revokeObjectURL(url);
+        showToast(t('toast.themeExported'), 'info');
+    }, { signal: sig });
+
+    // ---- Reset ----
+    modal.querySelector('#htd-reset').addEventListener('click', () => {
+        st.hue = 265; st.sat = 84; st.colorLight = 50; st.bright = 25; st.accent = '#f59e0b';
+        st.overrides = {}; st.drawerBg = '';
+        st.rpgColor = '#000000'; st.rpgOpacity = 85;
+        st.diceColor = '#1a1a2e'; st.diceOpacity = 15;
+        st.radarColor = ''; st.radarLabel = '';
+        st.images = { drawer: '', header: '', body: '', panel: '' };
+        st.imgOp = { drawer: 30, header: 50, body: 30, panel: 30 };
+        hueInd.style.left = `${(265 / 360) * 100}%`;
+        hueInd.style.background = `hsl(265, 100%, 50%)`;
+        modal.querySelector('#htd-sat').value = 84; modal.querySelector('#htd-satv').textContent = '84';
+        modal.querySelector('#htd-cl').value = 50; modal.querySelector('#htd-clv').textContent = '50';
+        modal.querySelector('#htd-bri').value = 25; modal.querySelector('#htd-briv').textContent = t('ui.night');
+        modal.querySelector('#htd-accent').value = '#f59e0b';
+        modal.querySelector('#htd-accent-hex').textContent = '#f59e0b';
+        modal.querySelector('#htd-dbg-hex').textContent = t('ui.followTheme');
+        modal.querySelector('#htd-rpg-color').value = '#000000';
+        modal.querySelector('#htd-rpg-color-hex').textContent = '#000000';
+        modal.querySelector('#htd-rpg-op').value = 85;
+        modal.querySelector('#htd-rpg-opv').textContent = '85';
+        modal.querySelector('#htd-dice-color').value = '#1a1a2e';
+        modal.querySelector('#htd-dice-color-hex').textContent = '#1a1a2e';
+        modal.querySelector('#htd-dice-op').value = 15;
+        modal.querySelector('#htd-dice-opv').textContent = '15';
+        modal.querySelector('#htd-radar-color-hex').textContent = t('ui.followTheme');
+        modal.querySelector('#htd-radar-label-hex').textContent = t('ui.followText');
+        ['drawer', 'header', 'body', 'panel'].forEach(k => {
+            const u = modal.querySelector(`#htd-img-${k}`); if (u) u.value = '';
+            const defOp = k === 'header' ? 50 : 30;
+            const s = modal.querySelector(`#htd-imgsl-${k}`); if (s) s.value = defOp;
+            const v = modal.querySelector(`#htd-imgop-${k}`); if (v) v.textContent = String(defOp);
+            const p = modal.querySelector(`#htd-imgpv-${k}`); if (p) p.style.display = 'none';
+        });
+        const fBody = modal.querySelector('#htd-fine-body');
+        if (fBody.style.display !== 'none') buildFine();
+        update();
+        showToast(t('toast.themeReset'), 'info');
+    }, { signal: sig });
+
+    update();
+}
+
+/**
+ * 为消息添加元数据面板
+ */
+function addMessagePanel(messageEl, messageIndex) {
+    try {
+    const existingPanel = messageEl.querySelector('.horae-message-panel');
+    if (existingPanel) return;
+    
+    const meta = horaeManager.getMessageMeta(messageIndex);
+    if (!meta) return;
+    
+    // 格式化时间（标准日历添加周几）
+    let time = '--';
+    if (meta.timestamp?.story_date) {
+        const parsed = parseStoryDate(meta.timestamp.story_date);
+        if (parsed && parsed.type === 'standard') {
+            time = formatStoryDate(parsed, true);
+        } else {
+            time = meta.timestamp.story_date;
+        }
+        if (meta.timestamp.story_time) {
+            time += ' ' + meta.timestamp.story_time;
+        }
+    }
+    // 兼容新旧事件格式
+    const eventsArr = meta.events || (meta.event ? [meta.event] : []);
+    const eventSummary = eventsArr.length > 0 
+        ? eventsArr.map(e => e.summary).join(' | ') 
+        : t('ui.noSpecialEvents');
+    const charCount = meta.scene?.characters_present?.length || 0;
+    const isSkipped = !!meta._skipHorae;
+    const sideplayBtnStyle = settings.sideplayMode ? '' : 'display:none;';
+    
+    const panelHtml = `
+        <div class="horae-message-panel${isSkipped ? ' horae-sideplay' : ''}" data-message-id="${messageIndex}">
+            <div class="horae-panel-toggle">
+                <div class="horae-panel-icon">
+                    <i class="fa-regular ${isSkipped ? 'fa-eye-slash' : 'fa-clock'}"></i>
+                </div>
+                <div class="horae-panel-summary">
+                    ${isSkipped ? `<span class="horae-sideplay-badge">${t('badge.sideplay')}</span>` : ''}
+                    <span class="horae-summary-time">${isSkipped ? t('badge.noTracking') : time}</span>
+                    <span class="horae-summary-divider">|</span>
+                    <span class="horae-summary-event">${isSkipped ? t('badge.sideplayMarked') : eventSummary}</span>
+                    <span class="horae-summary-divider">|</span>
+                    <span class="horae-summary-chars">${isSkipped ? '' : charCount + ' ' + t('characters.present')}</span>
+                </div>
+                <div class="horae-panel-actions">
+                    <button class="horae-btn-sideplay" title="${t('tooltip.sideplayMark')}" style="${sideplayBtnStyle}">
+                        <i class="fa-solid ${isSkipped ? 'fa-eye' : 'fa-masks-theater'}"></i>
+                    </button>
+                    <button class="horae-btn-rescan" title="${t('tooltip.rescan')}">
+                        <i class="fa-solid fa-rotate"></i>
+                    </button>
+                    <button class="horae-btn-expand" title="${t('tooltip.expandCollapse')}">
+                        <i class="fa-solid fa-chevron-down"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="horae-panel-content" style="display: none;">
+                ${buildPanelContent(messageIndex, meta)}
+            </div>
+        </div>
+    `;
+    
+    const mesTextEl = messageEl.querySelector('.mes_text');
+    if (mesTextEl) {
+        mesTextEl.insertAdjacentHTML('afterend', panelHtml);
+        const panelEl = messageEl.querySelector('.horae-message-panel');
+        bindPanelEvents(panelEl);
+        if (!settings.showMessagePanel && panelEl) {
+            panelEl.style.display = 'none';
+        }
+        // 应用自定义宽度和偏移
+        const w = Math.max(50, Math.min(100, settings.panelWidth || 100));
+        if (w < 100 && panelEl) {
+            panelEl.style.maxWidth = `${w}%`;
+        }
+        const ofs = Math.max(0, settings.panelOffset || 0);
+        if (ofs > 0 && panelEl) {
+            panelEl.style.marginLeft = `${ofs}px`;
+        }
+        // 继承主题模式
+        if (isLightMode() && panelEl) {
+            panelEl.classList.add('horae-light');
+        }
+        renderRpgHud(messageEl, messageIndex);
+    }
+    } catch (err) {
+        console.error(`[Horae] addMessagePanel #${messageIndex} 失败:`, err);
+    }
+}
+
+/**
+ * 构建已删除物品显示
+ */
+function buildDeletedItemsDisplay(deletedItems) {
+    if (!deletedItems || deletedItems.length === 0) {
+        return '';
+    }
+    return deletedItems.map(item => `
+        <div class="horae-deleted-item-tag">
+            <i class="fa-solid fa-xmark"></i> ${item}
+        </div>
+    `).join('');
+}
+
+/**
+ * 构建待办事项编辑行
+ */
+function buildAgendaEditorRows(agenda) {
+    if (!agenda || agenda.length === 0) {
+        return '';
+    }
+    return agenda.map(item => `
+        <div class="horae-editor-row horae-agenda-edit-row">
+            <input type="text" class="horae-agenda-date" style="flex:0 0 90px;max-width:90px;" value="${escapeHtml(item.date || '')}" placeholder="${t('label.date')}">
+            <input type="text" class="horae-agenda-text" style="flex:1 1 0;min-width:0;" value="${escapeHtml(item.text || '')}" placeholder="${t('placeholder.agendaContentHint')}">
+            <button class="horae-delete-btn"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+    `).join('');
+}
+
+/** 关系网络面板渲染 — 数据源为 chat[0].horae_meta，不消耗 AI 输出 */
+function buildPanelRelationships(meta) {
+    if (!settings.sendRelationships) return '';
+    const presentChars = meta.scene?.characters_present || [];
+    const rels = horaeManager.getRelationshipsForCharacters(presentChars);
+    if (rels.length === 0) return '';
+    
+    const rows = rels.map(r => {
+        const noteStr = r.note ? ` <span class="horae-rel-note-sm">(${r.note})</span>` : '';
+        return `<div class="horae-panel-rel-row">${r.from} <span class="horae-rel-arrow-sm">→</span> ${r.to}: <strong>${r.type}</strong>${noteStr}</div>`;
+    }).join('');
+    
+    return `
+        <div class="horae-panel-row full-width">
+            <label><i class="fa-solid fa-diagram-project"></i> ${t('characters.relationships')}</label>
+            <div class="horae-panel-relationships">${rows}</div>
+        </div>`;
+}
+
+function buildPanelMoodEditable(meta) {
+    if (!settings.sendMood) return '';
+    const moodEntries = Object.entries(meta.mood || {});
+    const rows = moodEntries.map(([char, emotion]) => `
+        <div class="horae-editor-row horae-mood-row">
+            <span class="mood-char">${escapeHtml(char)}</span>
+            <input type="text" class="mood-emotion" value="${escapeHtml(emotion)}" placeholder="${t('placeholder.moodState')}"
+            <button class="horae-delete-btn"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+    `).join('');
+    return `
+        <div class="horae-panel-row full-width">
+            <label><i class="fa-solid fa-face-smile"></i> ${t('ui.moodLabel')}</label>
+            <div class="horae-mood-editor">${rows}</div>
+            <button class="horae-btn-add-mood"><i class="fa-solid fa-plus"></i> ${t('common.add')}</button>
+        </div>`;
+}
+
+function buildPanelContent(messageIndex, meta) {
+    const costumeRows = Object.entries(meta.costumes || {}).map(([char, costume]) => `
+        <div class="horae-editor-row">
+            <input type="text" class="char-input" value="${escapeHtml(char)}" placeholder="${t('placeholder.holderName')}">
+            <input type="text" value="${escapeHtml(costume)}" placeholder="${t('placeholder.costumeDesc')}">
+            <button class="horae-delete-btn"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+    `).join('');
+    
+    // 物品分类由主页面管理，底部栏不显示
+    const itemRows = Object.entries(meta.items || {}).map(([name, info]) => {
+        return `
+            <div class="horae-editor-row horae-item-row">
+                <input type="text" class="horae-item-icon" value="${escapeHtml(info.icon || '')}" placeholder="📦" maxlength="2">
+                <input type="text" class="horae-item-name" value="${escapeHtml(name)}" placeholder="${t('placeholder.itemName')}">
+                <input type="text" class="horae-item-holder" value="${escapeHtml(info.holder || '')}" placeholder="${t('label.holder')}">
+                <input type="text" class="horae-item-location" value="${escapeHtml(info.location || '')}" placeholder="${t('label.location')}">
+                <button class="horae-delete-btn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="horae-editor-row horae-item-desc-row">
+                <input type="text" class="horae-item-description" value="${escapeHtml(info.description || '')}" placeholder="${t('placeholder.itemDesc')}">
+            </div>
+        `;
+    }).join('');
+    
+    // 获取前一条消息的好感总值（使用缓存避免 O(n²) 重复遍历）
+    const prevTotals = {};
+    const chat = horaeManager.getChat();
+    if (!buildPanelContent._affCache || buildPanelContent._affCacheLen !== chat.length) {
+        buildPanelContent._affCache = [];
+        buildPanelContent._affCacheLen = chat.length;
+        const running = {};
+        for (let i = 0; i < chat.length; i++) {
+            const m = chat[i]?.horae_meta;
+            if (m?.affection) {
+                for (const [k, v] of Object.entries(m.affection)) {
+                    let val = 0;
+                    if (typeof v === 'object' && v !== null) {
+                        if (v.type === 'absolute') val = parseFloat(v.value) || 0;
+                        else if (v.type === 'relative') val = (running[k] || 0) + (parseFloat(v.value) || 0);
+                    } else {
+                        val = (running[k] || 0) + (parseFloat(v) || 0);
+                    }
+                    running[k] = val;
+                }
+            }
+            buildPanelContent._affCache[i] = { ...running };
+        }
+    }
+    if (messageIndex > 0 && buildPanelContent._affCache[messageIndex - 1]) {
+        Object.assign(prevTotals, buildPanelContent._affCache[messageIndex - 1]);
+    }
+    
+    const affectionRows = Object.entries(meta.affection || {}).map(([key, value]) => {
+        // 解析当前层的值
+        let delta = 0, newTotal = 0;
+        const prevVal = prevTotals[key] || 0;
+        
+        if (typeof value === 'object' && value !== null) {
+            if (value.type === 'absolute') {
+                newTotal = parseFloat(value.value) || 0;
+                delta = newTotal - prevVal;
+            } else if (value.type === 'relative') {
+                delta = parseFloat(value.value) || 0;
+                newTotal = prevVal + delta;
+            }
+        } else {
+            delta = parseFloat(value) || 0;
+            newTotal = prevVal + delta;
+        }
+        
+        const roundedDelta = Math.round(delta * 100) / 100;
+        const roundedTotal = Math.round(newTotal * 100) / 100;
+        const deltaStr = roundedDelta >= 0 ? `+${roundedDelta}` : `${roundedDelta}`;
+        return `
+            <div class="horae-editor-row horae-affection-row" data-char="${escapeHtml(key)}" data-prev="${prevVal}">
+                <span class="horae-affection-char">${escapeHtml(key)}</span>
+                <input type="text" class="horae-affection-delta" value="${deltaStr}" placeholder="${t('placeholder.affectionDelta')}">
+                <input type="number" class="horae-affection-total" value="${roundedTotal}" placeholder="${t('placeholder.affectionTotal')}" step="any">
+                <button class="horae-delete-btn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+        `;
+    }).join('');
+    
+    // 兼容新旧事件格式
+    const eventsArr = meta.events || (meta.event ? [meta.event] : []);
+    const firstEvent = eventsArr[0] || {};
+    const eventLevel = firstEvent.level || '';
+    const eventSummary = firstEvent.summary || '';
+    const multipleEventsNote = eventsArr.length > 1 ? `<span class="horae-note">${t('ui.multipleEventsNote', {n: eventsArr.length})}</span>` : '';
+    
+    return `
+        <div class="horae-panel-grid">
+            <div class="horae-panel-row">
+                <label><i class="fa-regular fa-clock"></i> ${t('label.time')}</label>
+                <div class="horae-panel-value">
+                    <input type="text" class="horae-input-datetime" placeholder="${t('placeholder.dateTime')}" value="${escapeHtml((() => {
+                        let val = meta.timestamp?.story_date || '';
+                        if (meta.timestamp?.story_time) val += (val ? ' ' : '') + meta.timestamp.story_time;
+                        return val;
+                    })())}">
+                </div>
+            </div>
+            <div class="horae-panel-row">
+                <label><i class="fa-solid fa-location-dot"></i> ${t('label.location')}</label>
+                <div class="horae-panel-value">
+                    <input type="text" class="horae-input-location" value="${escapeHtml(meta.scene?.location || '')}" placeholder="${t('label.location')}">
+                </div>
+            </div>
+            <div class="horae-panel-row">
+                <label><i class="fa-solid fa-cloud"></i> ${t('label.atmosphere')}</label>
+                <div class="horae-panel-value">
+                    <input type="text" class="horae-input-atmosphere" value="${escapeHtml(meta.scene?.atmosphere || '')}" placeholder="${t('label.atmosphere')}">
+                </div>
+            </div>
+            <div class="horae-panel-row">
+                <label><i class="fa-solid fa-users"></i> ${t('characters.present')}</label>
+                <div class="horae-panel-value">
+                    <input type="text" class="horae-input-characters" value="${escapeHtml((meta.scene?.characters_present || []).join(', '))}" placeholder="${t('placeholder.charactersSeparated')}">
+                </div>
+            </div>
+            <div class="horae-panel-row full-width">
+                <label><i class="fa-solid fa-shirt"></i> ${t('status.costumes')}</label>
+                <div class="horae-costume-editor">${costumeRows}</div>
+                <button class="horae-btn-add-costume"><i class="fa-solid fa-plus"></i> ${t('common.add')}</button>
+            </div>
+            ${buildPanelMoodEditable(meta)}
+            <div class="horae-panel-row full-width">
+                <label><i class="fa-solid fa-box-open"></i> ${t('status.itemTracking')}</label>
+                <div class="horae-items-editor">${itemRows}</div>
+                <button class="horae-btn-add-item"><i class="fa-solid fa-plus"></i> ${t('common.add')}</button>
+            </div>
+            <div class="horae-panel-row full-width">
+                <label><i class="fa-solid fa-trash-can"></i> ${t('items.deletedItems')}</label>
+                <div class="horae-deleted-items-display">${buildDeletedItemsDisplay(meta.deletedItems)}</div>
+            </div>
+            <div class="horae-panel-row full-width">
+                <label><i class="fa-solid fa-bookmark"></i> ${t('timeline.events')} ${multipleEventsNote}</label>
+                <div class="horae-event-editor">
+                    <select class="horae-input-event-level">
+                        <option value="">${t('levels.none')}</option>
+                        <option value="一般" ${eventLevel === '一般' ? 'selected' : ''}>${t('levels.normal')}</option>
+                        <option value="重要" ${eventLevel === '重要' ? 'selected' : ''}>${t('levels.important')}</option>
+                        <option value="关键" ${eventLevel === '关键' || eventLevel === '關鍵' ? 'selected' : ''}>${t('levels.critical')}</option>
+                    </select>
+                    <input type="text" class="horae-input-event-summary" value="${escapeHtml(eventSummary)}" placeholder="${t('placeholder.eventSummary')}">
+                </div>
+            </div>
+            <div class="horae-panel-row full-width">
+                <label><i class="fa-solid fa-heart"></i> ${t('characters.affection')}</label>
+                <div class="horae-affection-editor">${affectionRows}</div>
+                <button class="horae-btn-add-affection"><i class="fa-solid fa-plus"></i> ${t('common.add')}</button>
+            </div>
+            <div class="horae-panel-row full-width">
+                <label><i class="fa-solid fa-list-check"></i> ${t('timeline.agenda')}</label>
+                <div class="horae-agenda-editor">${buildAgendaEditorRows(meta.agenda)}</div>
+                <button class="horae-btn-add-agenda-row"><i class="fa-solid fa-plus"></i> ${t('common.add')}</button>
+            </div>
+            ${buildPanelRelationships(meta)}
+        </div>
+        <div class="horae-panel-rescan">
+            <div class="horae-rescan-label"><i class="fa-solid fa-rotate"></i> ${t('ui.rescanMessage')}</div>
+            <div class="horae-rescan-buttons">
+                <button class="horae-btn-quick-scan horae-btn" title="${t('ui.quickScanTitle')}">
+                    <i class="fa-solid fa-bolt"></i> ${t('tooltip.quickScan')}
+                </button>
+                <button class="horae-btn-ai-analyze horae-btn" title="${t('ui.aiAnalyzeTitle')}">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> ${t('tooltip.aiAnalysis')}
+                </button>
+            </div>
+        </div>
+        <div class="horae-panel-footer">
+            <button class="horae-btn-save horae-btn"><i class="fa-solid fa-check"></i> ${t('common.save')}</button>
+            <button class="horae-btn-cancel horae-btn"><i class="fa-solid fa-xmark"></i> ${t('common.cancel')}</button>
+            <button class="horae-btn-open-drawer horae-btn" title="${t('tooltip.openPanel')}"><i class="fa-solid fa-clock-rotate-left"></i></button>
+        </div>
+    `;
+}
+
+/**
+ * 绑定面板事件
+ */
+function bindPanelEvents(panelEl) {
+    if (!panelEl) return;
+    
+    const messageId = parseInt(panelEl.dataset.messageId);
+    const contentEl = panelEl.querySelector('.horae-panel-content');
+    
+    // 头部区域事件只绑定一次，避免重复绑定导致 toggle 互相抵消
+    if (!panelEl._horaeBound) {
+        panelEl._horaeBound = true;
+        const toggleEl = panelEl.querySelector('.horae-panel-toggle');
+        const expandBtn = panelEl.querySelector('.horae-btn-expand');
+        const rescanBtn = panelEl.querySelector('.horae-btn-rescan');
+        
+        const togglePanel = () => {
+            const isHidden = contentEl.style.display === 'none';
+            contentEl.style.display = isHidden ? 'block' : 'none';
+            const icon = expandBtn?.querySelector('i');
+            if (icon) icon.className = isHidden ? 'fa-solid fa-chevron-up' : 'fa-solid fa-chevron-down';
+        };
+        
+        const sideplayBtn = panelEl.querySelector('.horae-btn-sideplay');
+        
+        toggleEl?.addEventListener('click', (e) => {
+            if (e.target.closest('.horae-btn-expand') || e.target.closest('.horae-btn-rescan') || e.target.closest('.horae-btn-sideplay')) return;
+            togglePanel();
+        });
+        expandBtn?.addEventListener('click', togglePanel);
+        rescanBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            rescanMessageMeta(messageId, panelEl);
+        });
+        sideplayBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleSideplay(messageId, panelEl);
+        });
+    }
+    
+    // 标记面板已修改
+    let panelDirty = false;
+    contentEl?.addEventListener('input', () => { panelDirty = true; });
+    contentEl?.addEventListener('change', () => { panelDirty = true; });
+    
+    panelEl.querySelector('.horae-btn-save')?.addEventListener('click', () => {
+        savePanelData(panelEl, messageId);
+        panelDirty = false;
+    });
+    
+    panelEl.querySelector('.horae-btn-cancel')?.addEventListener('click', () => {
+        if (panelDirty && !confirm(t('confirm.closeUnsaved'))) return;
+        contentEl.style.display = 'none';
+        panelDirty = false;
+    });
+    
+    panelEl.querySelector('.horae-btn-open-drawer')?.addEventListener('click', () => {
+        const drawerIcon = $('#horae_drawer_icon');
+        const drawerContent = $('#horae_drawer_content');
+        const isOpen = drawerIcon.hasClass('openIcon');
+        if (isOpen) {
+            drawerIcon.removeClass('openIcon').addClass('closedIcon');
+            drawerContent.removeClass('openDrawer').addClass('closedDrawer').css('display', 'none');
+        } else {
+            // 关闭其他抽屉
+            $('.openDrawer').not('#horae_drawer_content').not('.pinnedOpen').css('display', 'none')
+                .removeClass('openDrawer').addClass('closedDrawer');
+            $('.openIcon').not('#horae_drawer_icon').not('.drawerPinnedOpen')
+                .removeClass('openIcon').addClass('closedIcon');
+            drawerIcon.removeClass('closedIcon').addClass('openIcon');
+            drawerContent.removeClass('closedDrawer').addClass('openDrawer').css('display', '');
+        }
+    });
+    
+    panelEl.querySelector('.horae-btn-add-costume')?.addEventListener('click', () => {
+        const editor = panelEl.querySelector('.horae-costume-editor');
+        const emptyHint = editor.querySelector('.horae-empty-hint');
+        if (emptyHint) emptyHint.remove();
+        
+        editor.insertAdjacentHTML('beforeend', `
+            <div class="horae-editor-row">
+                <input type="text" class="char-input" placeholder="${t('placeholder.holderName')}">
+                <input type="text" placeholder="${t('placeholder.costumeDesc')}">
+                <button class="horae-delete-btn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+        `);
+        bindDeleteButtons(editor);
+    });
+    
+    panelEl.querySelector('.horae-btn-add-mood')?.addEventListener('click', () => {
+        const editor = panelEl.querySelector('.horae-mood-editor');
+        if (!editor) return;
+        editor.insertAdjacentHTML('beforeend', `
+            <div class="horae-editor-row horae-mood-row">
+                <input type="text" class="mood-char" placeholder="${t('placeholder.holderName')}">
+                <input type="text" class="mood-emotion" placeholder="${t('placeholder.moodState')}">
+                <button class="horae-delete-btn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+        `);
+        bindDeleteButtons(editor);
+    });
+    
+    panelEl.querySelector('.horae-btn-add-item')?.addEventListener('click', () => {
+        const editor = panelEl.querySelector('.horae-items-editor');
+        const emptyHint = editor.querySelector('.horae-empty-hint');
+        if (emptyHint) emptyHint.remove();
+        
+        editor.insertAdjacentHTML('beforeend', `
+            <div class="horae-editor-row horae-item-row">
+                <input type="text" class="horae-item-icon" placeholder="📦" maxlength="2">
+                <input type="text" class="horae-item-name" placeholder="${t('placeholder.itemName')}">
+                <input type="text" class="horae-item-holder" placeholder="${t('label.holder')}">
+                <input type="text" class="horae-item-location" placeholder="${t('label.location')}">
+                <button class="horae-delete-btn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="horae-editor-row horae-item-desc-row">
+                <input type="text" class="horae-item-description" placeholder="${t('placeholder.itemDesc')}">
+            </div>
+        `);
+        bindDeleteButtons(editor);
+    });
+    
+    panelEl.querySelector('.horae-btn-add-affection')?.addEventListener('click', () => {
+        const editor = panelEl.querySelector('.horae-affection-editor');
+        const emptyHint = editor.querySelector('.horae-empty-hint');
+        if (emptyHint) emptyHint.remove();
+        
+        editor.insertAdjacentHTML('beforeend', `
+            <div class="horae-editor-row horae-affection-row" data-char="" data-prev="0">
+                <input type="text" class="horae-affection-char-input" placeholder="${t('placeholder.holderName')}">
+                <input type="text" class="horae-affection-delta" value="+0" placeholder="${t('placeholder.affectionDelta')}">
+                <input type="number" class="horae-affection-total" value="0" placeholder="${t('placeholder.affectionTotal')}">
+                <button class="horae-delete-btn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+        `);
+        bindDeleteButtons(editor);
+        bindAffectionInputs(editor);
+    });
+    
+    // 添加待办事项行
+    panelEl.querySelector('.horae-btn-add-agenda-row')?.addEventListener('click', () => {
+        const editor = panelEl.querySelector('.horae-agenda-editor');
+        const emptyHint = editor.querySelector('.horae-empty-hint');
+        if (emptyHint) emptyHint.remove();
+        
+        editor.insertAdjacentHTML('beforeend', `
+            <div class="horae-editor-row horae-agenda-edit-row">
+                <input type="text" class="horae-agenda-date" style="flex:0 0 90px;max-width:90px;" value="" placeholder="${t('label.date')}">
+                <input type="text" class="horae-agenda-text" style="flex:1 1 0;min-width:0;" value="" placeholder="${t('placeholder.agendaContentHint')}">
+                <button class="horae-delete-btn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+        `);
+        bindDeleteButtons(editor);
+    });
+    
+    // 绑定好感度输入联动
+    bindAffectionInputs(panelEl.querySelector('.horae-affection-editor'));
+    
+    // 绑定现有删除按钮
+    bindDeleteButtons(panelEl);
+    
+    // 快速解析按钮（不消耗API）
+    panelEl.querySelector('.horae-btn-quick-scan')?.addEventListener('click', async () => {
+        const chat = horaeManager.getChat();
+        const message = chat[messageId];
+        if (!message) {
+            showToast(t('toast.cannotGetContent'), 'error');
+            return;
+        }
+        
+        // 先尝试解析标准标签
+        let parsed = horaeManager.parseHoraeTag(message.mes);
+        
+        // 如果没有标签，尝试宽松解析
+        if (!parsed) {
+            parsed = horaeManager.parseLooseFormat(message.mes);
+        }
+        
+        if (parsed) {
+            // 获取现有元数据并合并
+            const existingMeta = horaeManager.getMessageMeta(messageId) || createEmptyMeta();
+            const newMeta = horaeManager.mergeParsedToMeta(existingMeta, parsed);
+            // 处理表格更新
+            if (newMeta._tableUpdates) {
+                horaeManager.applyTableUpdates(newMeta._tableUpdates);
+                delete newMeta._tableUpdates;
+            }
+            // 处理已完成待办
+            if (parsed.deletedAgenda && parsed.deletedAgenda.length > 0) {
+                horaeManager.removeCompletedAgenda(parsed.deletedAgenda);
+            }
+            // 全局同步
+            if (parsed.relationships?.length > 0) {
+                horaeManager._mergeRelationships(parsed.relationships);
+            }
+            if (parsed.scene?.scene_desc && parsed.scene?.location) {
+                horaeManager._updateLocationMemory(parsed.scene.location, parsed.scene.scene_desc);
+            }
+            horaeManager.setMessageMeta(messageId, newMeta);
+            
+            const contentEl = panelEl.querySelector('.horae-panel-content');
+            if (contentEl) {
+                contentEl.innerHTML = buildPanelContent(messageId, newMeta);
+                bindPanelEvents(panelEl);
+            }
+            
+            getContext().saveChat();
+            refreshAllDisplays();
+            showToast(t('toast.saveSuccess'), 'success');
+        } else {
+            showToast(t('toast.noFormatData'), 'warning');
+        }
+    });
+    
+    // AI分析按钮（消耗API）
+    panelEl.querySelector('.horae-btn-ai-analyze')?.addEventListener('click', async () => {
+        const chat = horaeManager.getChat();
+        const message = chat[messageId];
+        if (!message) {
+            showToast(t('toast.cannotGetContent'), 'error');
+            return;
+        }
+        
+        const btn = panelEl.querySelector('.horae-btn-ai-analyze');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${t('ui.analyzing')}`;
+        btn.disabled = true;
+        
+        try {
+            // 调用AI分析
+            const result = await analyzeMessageWithAI(message.mes);
+            
+            if (result) {
+                const existingMeta = horaeManager.getMessageMeta(messageId) || createEmptyMeta();
+                const newMeta = horaeManager.mergeParsedToMeta(existingMeta, result);
+                if (newMeta._tableUpdates) {
+                    horaeManager.applyTableUpdates(newMeta._tableUpdates);
+                    delete newMeta._tableUpdates;
+                }
+                // 处理已完成待办
+                if (result.deletedAgenda && result.deletedAgenda.length > 0) {
+                    horaeManager.removeCompletedAgenda(result.deletedAgenda);
+                }
+                // 全局同步
+                if (result.relationships?.length > 0) {
+                    horaeManager._mergeRelationships(result.relationships);
+                }
+                if (result.scene?.scene_desc && result.scene?.location) {
+                    horaeManager._updateLocationMemory(result.scene.location, result.scene.scene_desc);
+                }
+                horaeManager.setMessageMeta(messageId, newMeta);
+                
+                const contentEl = panelEl.querySelector('.horae-panel-content');
+                if (contentEl) {
+                    contentEl.innerHTML = buildPanelContent(messageId, newMeta);
+                    bindPanelEvents(panelEl);
+                }
+                
+                getContext().saveChat();
+                refreshAllDisplays();
+                showToast(t('toast.saveSuccess'), 'success');
+            } else {
+                showToast(t('toast.aiAnalysisNoData'), 'warning');
+            }
+        } catch (error) {
+            console.error('[Horae] AI分析失败:', error);
+            showToast(t('toast.aiAnalysisFailed', {error: error.message}), 'error');
+        } finally {
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }
+    });
+}
+
+/**
+ * 绑定删除按钮事件
+ */
+function bindDeleteButtons(container) {
+    container.querySelectorAll('.horae-delete-btn').forEach(btn => {
+        btn.onclick = () => {
+            const row = btn.closest('.horae-editor-row');
+            if (row?.classList.contains('horae-item-row')) {
+                const descRow = row.nextElementSibling;
+                if (descRow?.classList.contains('horae-item-desc-row')) {
+                    descRow.remove();
+                }
+            }
+            row?.remove();
+        };
+    });
+}
+
+/**
+ * 绑定好感度输入框联动
+ */
+function bindAffectionInputs(container) {
+    if (!container) return;
+    
+    container.querySelectorAll('.horae-affection-row').forEach(row => {
+        const deltaInput = row.querySelector('.horae-affection-delta');
+        const totalInput = row.querySelector('.horae-affection-total');
+        const prevVal = parseFloat(row.dataset.prev) || 0;
+        
+        deltaInput?.addEventListener('input', () => {
+            const deltaStr = deltaInput.value.replace(/[^\d\.\-+]/g, '');
+            const delta = parseFloat(deltaStr) || 0;
+            totalInput.value = parseFloat((prevVal + delta).toFixed(2));
+        });
+        
+        totalInput?.addEventListener('input', () => {
+            const total = parseFloat(totalInput.value) || 0;
+            const delta = parseFloat((total - prevVal).toFixed(2));
+            deltaInput.value = delta >= 0 ? `+${delta}` : `${delta}`;
+        });
+    });
+}
+
+/** 切换消息的番外/小剧场标记 */
+function toggleSideplay(messageId, panelEl) {
+    const meta = horaeManager.getMessageMeta(messageId);
+    if (!meta) return;
+    const wasSkipped = !!meta._skipHorae;
+    meta._skipHorae = !wasSkipped;
+    horaeManager.setMessageMeta(messageId, meta);
+    getContext().saveChat();
+    
+    // 重建面板
+    const messageEl = panelEl.closest('.mes');
+    if (messageEl) {
+        panelEl.remove();
+        addMessagePanel(messageEl, messageId);
+    }
+    refreshAllDisplays();
+    showToast(meta._skipHorae ? t('badge.sideplayMarked') : t('toast.saveSuccess'), 'success');
+}
+
+/** 重新扫描消息并更新面板（完全替换） */
+function rescanMessageMeta(messageId, panelEl) {
+    // 从DOM获取最新的消息内容（用户可能已编辑）
+    const messageEl = panelEl.closest('.mes');
+    if (!messageEl) {
+        showToast(t('toast.msgElementNotFound'), 'error');
+        return;
+    }
+    
+    // 获取文本内容（包括隐藏的horae标签）
+    // 先尝试从chat数组获取最新内容
+    const context = window.SillyTavern?.getContext?.() || getContext?.();
+    let messageContent = '';
+    
+    if (context?.chat?.[messageId]) {
+        messageContent = context.chat[messageId].mes;
+    }
+    
+    // 如果chat中没有或为空，从DOM获取
+    if (!messageContent) {
+        const mesTextEl = messageEl.querySelector('.mes_text');
+        if (mesTextEl) {
+            messageContent = mesTextEl.innerHTML;
+        }
+    }
+    
+    if (!messageContent) {
+        showToast(t('toast.cannotGetContent'), 'error');
+        return;
+    }
+    
+    const parsed = horaeManager.parseHoraeTag(messageContent);
+    
+    if (parsed) {
+        const existingMeta = horaeManager.getMessageMeta(messageId);
+        // 用 mergeParsedToMeta 以空 meta 为基础，确保所有字段一致处理
+        const newMeta = horaeManager.mergeParsedToMeta(createEmptyMeta(), parsed);
+        
+        // 只保留原有的NPC数据（如果新解析中没有）
+        if ((!parsed.npcs || Object.keys(parsed.npcs).length === 0) && existingMeta?.npcs) {
+            newMeta.npcs = existingMeta.npcs;
+        }
+        
+        // 无新agenda则保留旧数据
+        if ((!newMeta.agenda || newMeta.agenda.length === 0) && existingMeta?.agenda?.length > 0) {
+            newMeta.agenda = existingMeta.agenda;
+        }
+        
+        // 处理表格更新
+        if (newMeta._tableUpdates) {
+            horaeManager.applyTableUpdates(newMeta._tableUpdates);
+            delete newMeta._tableUpdates;
+        }
+        
+        // 处理已完成待办
+        if (parsed.deletedAgenda && parsed.deletedAgenda.length > 0) {
+            horaeManager.removeCompletedAgenda(parsed.deletedAgenda);
+        }
+        
+        // 全局同步：关系网络合并到 chat[0]
+        if (parsed.relationships?.length > 0) {
+            horaeManager._mergeRelationships(parsed.relationships);
+        }
+        // 全局同步：场景记忆更新
+        if (parsed.scene?.scene_desc && parsed.scene?.location) {
+            horaeManager._updateLocationMemory(parsed.scene.location, parsed.scene.scene_desc);
+        }
+        
+        horaeManager.setMessageMeta(messageId, newMeta);
+        getContext().saveChat();
+        
+        panelEl.remove();
+        addMessagePanel(messageEl, messageId);
+        
+        // 同时刷新主显示
+        refreshAllDisplays();
+        
+        showToast(t('toast.saveSuccess'), 'success');
+    } else {
+        // 无标签，清空数据（保留NPC）
+        const existingMeta = horaeManager.getMessageMeta(messageId);
+        const newMeta = createEmptyMeta();
+        if (existingMeta?.npcs) {
+            newMeta.npcs = existingMeta.npcs;
+        }
+        horaeManager.setMessageMeta(messageId, newMeta);
+        
+        panelEl.remove();
+        addMessagePanel(messageEl, messageId);
+        refreshAllDisplays();
+        
+        showToast(t('toast.noHoraeTagsFound'), 'warning');
+    }
+}
+
+/**
+ * 保存面板数据
+ */
+function savePanelData(panelEl, messageId) {
+    // 获取现有的 meta，保留面板中没有编辑区的数据（如 NPC）
+    const existingMeta = horaeManager.getMessageMeta(messageId);
+    const meta = createEmptyMeta();
+    
+    // 保留面板中没有编辑区的数据
+    if (existingMeta?.npcs) {
+        meta.npcs = JSON.parse(JSON.stringify(existingMeta.npcs));
+    }
+    if (existingMeta?.relationships?.length) {
+        meta.relationships = JSON.parse(JSON.stringify(existingMeta.relationships));
+    }
+    if (existingMeta?.scene?.scene_desc) {
+        meta.scene.scene_desc = existingMeta.scene.scene_desc;
+    }
+    if (existingMeta?.mood && Object.keys(existingMeta.mood).length > 0) {
+        meta.mood = JSON.parse(JSON.stringify(existingMeta.mood));
+    }
+    
+    // 分离日期时间
+    const datetimeVal = (panelEl.querySelector('.horae-input-datetime')?.value || '').trim();
+    const clockMatch = datetimeVal.match(/\b(\d{1,2}:\d{2})\s*$/);
+    if (clockMatch) {
+        meta.timestamp.story_time = clockMatch[1];
+        meta.timestamp.story_date = datetimeVal.substring(0, datetimeVal.lastIndexOf(clockMatch[1])).trim();
+    } else {
+        meta.timestamp.story_date = datetimeVal;
+        meta.timestamp.story_time = '';
+    }
+    meta.timestamp.absolute = new Date().toISOString();
+    
+    // 场景
+    meta.scene.location = panelEl.querySelector('.horae-input-location')?.value || '';
+    meta.scene.atmosphere = panelEl.querySelector('.horae-input-atmosphere')?.value || '';
+    const charsInput = panelEl.querySelector('.horae-input-characters')?.value || '';
+    meta.scene.characters_present = charsInput.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    
+    // 服装
+    panelEl.querySelectorAll('.horae-costume-editor .horae-editor-row').forEach(row => {
+        const inputs = row.querySelectorAll('input');
+        if (inputs.length >= 2) {
+            const char = inputs[0].value.trim();
+            const costume = inputs[1].value.trim();
+            if (char && costume) {
+                meta.costumes[char] = costume;
+            }
+        }
+    });
+    
+    // 情绪
+    panelEl.querySelectorAll('.horae-mood-editor .horae-mood-row').forEach(row => {
+        const charEl = row.querySelector('.mood-char');
+        const emotionInput = row.querySelector('.mood-emotion');
+        const char = (charEl?.tagName === 'INPUT' ? charEl.value : charEl?.textContent)?.trim();
+        const emotion = emotionInput?.value?.trim();
+        if (char && emotion) meta.mood[char] = emotion;
+    });
+    
+    // 物品配对处理
+    const itemMainRows = panelEl.querySelectorAll('.horae-items-editor .horae-item-row');
+    const itemDescRows = panelEl.querySelectorAll('.horae-items-editor .horae-item-desc-row');
+    const latestState = horaeManager.getLatestState();
+    const existingItems = latestState.items || {};
+    
+    itemMainRows.forEach((row, idx) => {
+        const iconInput = row.querySelector('.horae-item-icon');
+        const nameInput = row.querySelector('.horae-item-name');
+        const holderInput = row.querySelector('.horae-item-holder');
+        const locationInput = row.querySelector('.horae-item-location');
+        const descRow = itemDescRows[idx];
+        const descInput = descRow?.querySelector('.horae-item-description');
+        
+        if (nameInput) {
+            const name = nameInput.value.trim();
+            if (name) {
+                // 从物品栏获取已保存的importance，底部栏不再编辑分类
+                const existingImportance = existingItems[name]?.importance || existingMeta?.items?.[name]?.importance || '';
+                meta.items[name] = {
+                    icon: iconInput?.value.trim() || null,
+                    importance: existingImportance,  // 保留物品栏的分类
+                    holder: holderInput?.value.trim() || null,
+                    location: locationInput?.value.trim() || '',
+                    description: descInput?.value.trim() || ''
+                };
+            }
+        }
+    });
+    
+    // 事件
+    const eventLevel = panelEl.querySelector('.horae-input-event-level')?.value;
+    const eventSummary = panelEl.querySelector('.horae-input-event-summary')?.value;
+    if (eventLevel && eventSummary) {
+        meta.events = [{
+            is_important: eventLevel === '重要' || eventLevel === '关键' || eventLevel === '關鍵',
+            level: eventLevel,
+            summary: eventSummary
+        }];
+    }
+    
+    panelEl.querySelectorAll('.horae-affection-editor .horae-affection-row').forEach(row => {
+        const charSpan = row.querySelector('.horae-affection-char');
+        const charInput = row.querySelector('.horae-affection-char-input');
+        const totalInput = row.querySelector('.horae-affection-total');
+        
+        const key = charSpan?.textContent?.trim() || charInput?.value?.trim() || '';
+        const total = parseFloat(totalInput?.value) || 0;
+        
+        if (key) {
+            meta.affection[key] = { type: 'absolute', value: total };
+        }
+    });
+    
+    // 兼容旧格式
+    panelEl.querySelectorAll('.horae-affection-editor .horae-editor-row:not(.horae-affection-row)').forEach(row => {
+        const inputs = row.querySelectorAll('input');
+        if (inputs.length >= 2) {
+            const key = inputs[0].value.trim();
+            const value = inputs[1].value.trim();
+            if (key && value) {
+                meta.affection[key] = value;
+            }
+        }
+    });
+    
+    const agendaItems = [];
+    panelEl.querySelectorAll('.horae-agenda-editor .horae-agenda-edit-row').forEach(row => {
+        const dateInput = row.querySelector('.horae-agenda-date');
+        const textInput = row.querySelector('.horae-agenda-text');
+        const date = dateInput?.value?.trim() || '';
+        const text = textInput?.value?.trim() || '';
+        if (text) {
+            // 保留原 source
+            const existingAgendaItem = existingMeta?.agenda?.find(a => a.text === text);
+            const source = existingAgendaItem?.source || 'user';
+            agendaItems.push({ date, text, source, done: false });
+        }
+    });
+    if (agendaItems.length > 0) {
+        meta.agenda = agendaItems;
+    } else if (existingMeta?.agenda?.length > 0) {
+        // 无编辑行时保留原有待办
+        meta.agenda = existingMeta.agenda;
+    }
+    
+    horaeManager.setMessageMeta(messageId, meta);
+    
+    // 全局同步
+    if (meta.relationships?.length > 0) {
+        horaeManager._mergeRelationships(meta.relationships);
+    }
+    if (meta.scene?.scene_desc && meta.scene?.location) {
+        horaeManager._updateLocationMemory(meta.scene.location, meta.scene.scene_desc);
+    }
+    
+    // 同步写入正文标签
+    injectHoraeTagToMessage(messageId, meta);
+    
+    getContext().saveChat();
+    
+    showToast(t('toast.saveSuccess'), 'success');
+    refreshAllDisplays();
+    
+    // 更新面板摘要
+    const summaryTime = panelEl.querySelector('.horae-summary-time');
+    const summaryEvent = panelEl.querySelector('.horae-summary-event');
+    const summaryChars = panelEl.querySelector('.horae-summary-chars');
+    
+    if (summaryTime) {
+        if (meta.timestamp.story_date) {
+            const parsed = parseStoryDate(meta.timestamp.story_date);
+            let dateDisplay = meta.timestamp.story_date;
+            if (parsed && parsed.type === 'standard') {
+                dateDisplay = formatStoryDate(parsed, true);
+            }
+            summaryTime.textContent = dateDisplay + (meta.timestamp.story_time ? ' ' + meta.timestamp.story_time : '');
+        } else {
+            summaryTime.textContent = '--';
+        }
+    }
+    if (summaryEvent) {
+        const evts = meta.events || (meta.event ? [meta.event] : []);
+        summaryEvent.textContent = evts.length > 0 ? evts.map(e => e.summary).join(' | ') : t('ui.noSpecialEvents');
+    }
+    if (summaryChars) {
+        summaryChars.textContent = t('ui.presentCount', {n: meta.scene.characters_present.length});
+    }
+}
+
+/** 构建 <horae> 标签字符串 */
+function buildHoraeTagFromMeta(meta) {
+    const lines = [];
+    
+    if (meta.timestamp?.story_date) {
+        let timeLine = `time:${meta.timestamp.story_date}`;
+        if (meta.timestamp.story_time) timeLine += ` ${meta.timestamp.story_time}`;
+        lines.push(timeLine);
+    }
+    
+    if (meta.scene?.location) {
+        lines.push(`location:${meta.scene.location}`);
+    }
+    
+    if (meta.scene?.atmosphere) {
+        lines.push(`atmosphere:${meta.scene.atmosphere}`);
+    }
+    
+    if (meta.scene?.characters_present?.length > 0) {
+        lines.push(`characters:${meta.scene.characters_present.join(',')}`);
+    }
+    
+    if (meta.costumes) {
+        for (const [char, costume] of Object.entries(meta.costumes)) {
+            if (char && costume) {
+                lines.push(`costume:${char}=${costume}`);
+            }
+        }
+    }
+    
+    if (meta.items) {
+        for (const [name, info] of Object.entries(meta.items)) {
+            if (!name) continue;
+            const imp = info.importance === '!!' ? '!!' : info.importance === '!' ? '!' : '';
+            const icon = info.icon || '';
+            const desc = info.description ? `|${info.description}` : '';
+            const holder = info.holder || '';
+            const loc = info.location ? `@${info.location}` : '';
+            lines.push(`item${imp}:${icon}${name}${desc}=${holder}${loc}`);
+        }
+    }
+    
+    // deleted items
+    if (meta.deletedItems?.length > 0) {
+        for (const item of meta.deletedItems) {
+            lines.push(`item-:${item}`);
+        }
+    }
+    
+    if (meta.affection) {
+        for (const [name, value] of Object.entries(meta.affection)) {
+            if (!name) continue;
+            if (typeof value === 'object') {
+                if (value.type === 'relative') {
+                    lines.push(`affection:${name}${value.value}`);
+                } else {
+                    lines.push(`affection:${name}=${value.value}`);
+                }
+            } else {
+                lines.push(`affection:${name}=${value}`);
+            }
+        }
+    }
+    
+    // npcs（使用新格式：npc:名|外貌=性格@关系~扩展字段）
+    if (meta.npcs) {
+        for (const [name, info] of Object.entries(meta.npcs)) {
+            if (!name) continue;
+            const app = info.appearance || '';
+            const per = info.personality || '';
+            const rel = info.relationship || '';
+            let npcLine = '';
+            if (app || per || rel) {
+                npcLine = `npc:${name}|${app}=${per}@${rel}`;
+            } else {
+                npcLine = `npc:${name}`;
+            }
+            const extras = [];
+            if (info.gender) extras.push(`性别:${info.gender}`);
+            if (info.age) extras.push(`年龄:${info.age}`);
+            if (info.race) extras.push(`种族:${info.race}`);
+            if (info.job) extras.push(`职业:${info.job}`);
+            if (info.birthday) extras.push(`生日:${info.birthday}`);
+            if (info.note) extras.push(`补充:${info.note}`);
+            if (extras.length > 0) npcLine += `~${extras.join('~')}`;
+            lines.push(npcLine);
+        }
+    }
+    
+    if (meta.agenda?.length > 0) {
+        for (const item of meta.agenda) {
+            if (item.text) {
+                const datePart = item.date ? `${item.date}|` : '';
+                lines.push(`agenda:${datePart}${item.text}`);
+            }
+        }
+    }
+
+    if (meta.relationships?.length > 0) {
+        for (const r of meta.relationships) {
+            if (r.from && r.to && r.type) {
+                lines.push(`rel:${r.from}>${r.to}=${r.type}${r.note ? '|' + r.note : ''}`);
+            }
+        }
+    }
+
+    if (meta.mood && Object.keys(meta.mood).length > 0) {
+        for (const [char, emotion] of Object.entries(meta.mood)) {
+            if (char && emotion) lines.push(`mood:${char}=${emotion}`);
+        }
+    }
+
+    if (meta.scene?.scene_desc) {
+        lines.push(`scene_desc:${meta.scene.scene_desc}`);
+    }
+    
+    if (lines.length === 0) return '';
+    return `<horae>\n${lines.join('\n')}\n</horae>`;
+}
+
+/** 构建 <horaeevent> 标签字符串 */
+function buildHoraeEventTagFromMeta(meta) {
+    const events = meta.events || (meta.event ? [meta.event] : []);
+    if (events.length === 0) return '';
+    
+    const lines = events
+        .filter(e => e.summary)
+        .map(e => `event:${e.level || '一般'}|${e.summary}`);
+    
+    if (lines.length === 0) return '';
+    return `<horaeevent>\n${lines.join('\n')}\n</horaeevent>`;
+}
+
+/** 同步注入正文标签 */
+function injectHoraeTagToMessage(messageId, meta) {
+    try {
+        const chat = horaeManager.getChat();
+        if (!chat?.[messageId]) return;
+        
+        const message = chat[messageId];
+        let mes = message.mes;
+        
+        // === 处理 <horae> 标签 ===
+        const newHoraeTag = buildHoraeTagFromMeta(meta);
+        const hasHoraeTag = /<horae>[\s\S]*?<\/horae>/i.test(mes);
+        
+        if (hasHoraeTag) {
+            mes = newHoraeTag
+                ? mes.replace(/<horae>[\s\S]*?<\/horae>/gi, newHoraeTag)
+                : mes.replace(/<horae>[\s\S]*?<\/horae>/gi, '').trim();
+        } else if (newHoraeTag) {
+            mes = mes.trimEnd() + '\n\n' + newHoraeTag;
+        }
+        
+        // === 处理 <horaeevent> 标签 ===
+        const newEventTag = buildHoraeEventTagFromMeta(meta);
+        const hasEventTag = /<horaeevent>[\s\S]*?<\/horaeevent>/i.test(mes);
+        
+        if (hasEventTag) {
+            mes = newEventTag
+                ? mes.replace(/<horaeevent>[\s\S]*?<\/horaeevent>/gi, newEventTag)
+                : mes.replace(/<horaeevent>[\s\S]*?<\/horaeevent>/gi, '').trim();
+        } else if (newEventTag) {
+            mes = mes.trimEnd() + '\n' + newEventTag;
+        }
+        
+        message.mes = mes;
+        console.log(`[Horae] 已同步写入消息 #${messageId} 的标签`);
+    } catch (error) {
+        console.error(`[Horae] 写入标签失败:`, error);
+    }
+}
+
+// ============================================
 // 抽屉面板交互
 // ============================================
 
@@ -3655,7 +10323,7 @@ async function initDrawer() {
     const toggle = $('#horae_drawer .drawer-toggle');
     
     if (isNewNavbarVersion()) {
-        toggle.on('click', appState.doNavbarIconClick);
+        toggle.on('click', doNavbarIconClick);
         console.log(`[Horae] 使用新版导航栏模式`);
     } else {
         $('#horae_drawer_content').attr('data-slide-toggle', 'hidden').css('display', 'none');
@@ -3769,6 +10437,10 @@ function initSettingsEvents() {
         if (isNaN(settings.forgetThreshold) || settings.forgetThreshold < 0.01) settings.forgetThreshold = 0.2;
         saveSettings();
         horaeManager.init(getContext(), settings);
+    });
+        saveSettings();
+        horaeManager.init(getContext(), settings);
+        updateTokenCounter();
     });
     
     $('#horae-setting-injection-position').on('change', function() {
@@ -4463,12 +11135,12 @@ function initSettingsEvents() {
     $('#horae-btn-items-cancel-select').on('click', exitMultiSelectMode);
     
     $('#horae-btn-npc-multiselect').on('click', () => {
-        appState.npcMultiSelectMode ? exitNpcMultiSelect() : enterNpcMultiSelect();
+        npcMultiSelectMode ? exitNpcMultiSelect() : enterNpcMultiSelect();
     });
     $('#horae-btn-npc-select-all').on('click', () => {
         document.querySelectorAll('#horae-npc-list .horae-npc-item').forEach(el => {
             const name = el.dataset.npcName;
-            if (name) appState.selectedNpcs.add(name);
+            if (name) selectedNpcs.add(name);
         });
         updateCharactersDisplay();
         _updateNpcSelectedCount();
@@ -6457,8 +13129,8 @@ async function _geminiNativeRequest(prompt, rawUrl, model, apiKey) {
 /** 自动摘要：检查是否需要触发 */
 async function checkAutoSummary() {
     if (!settings.autoSummaryEnabled || !settings.sendTimeline) return;
-    if (appState._summaryInProgress) return;
-    appState._summaryInProgress = true;
+    if (_summaryInProgress) return;
+    _summaryInProgress = true;
     
     try {
         const chat = horaeManager.getChat();
@@ -6684,7 +13356,7 @@ async function checkAutoSummary() {
         console.error('[Horae] auto summary failed:', err);
         showToast(t('toast.autoSummaryFailed', {error: err.message || err}), 'error');
     } finally {
-        appState._summaryInProgress = false;
+        _summaryInProgress = false;
         // 权威存盘：补偿 onMessageReceived 因竞态保护而跳过的 save
         try {
             await enforceHiddenState();
@@ -8295,7 +14967,7 @@ async function onMessageReceived(messageId) {
             horaeManager.rebuildRpgData();
         }
         
-        if (!appState._summaryInProgress) {
+        if (!_summaryInProgress) {
             await getContext().saveChat();
         }
     } catch (err) {
@@ -8429,7 +15101,7 @@ function onMessageEdited(messageId) {
 
 /** 注入上下文（数据+规则合并注入） */
 async function onPromptReady(eventData) {
-    if (appState._isSummaryGeneration) return;
+    if (_isSummaryGeneration) return;
     if (!settings.enabled || !settings.injectContext) return;
     if (eventData.dryRun) return;
     
@@ -8543,7 +15215,7 @@ function _rebuildGlobalDataForCurrentChat() {
  */
 async function onChatChanged() {
     if (!settings.enabled) return;
-    appState._chatFullyLoaded = false;
+    _chatFullyLoaded = false;
     
     try {
         clearTableHistory();
@@ -8578,7 +15250,7 @@ async function onChatChanged() {
     } catch (err) {
         console.error('[Horae] onChatChanged 初始化失败:', err);
     }
-    appState._chatFullyLoaded = true;
+    _chatFullyLoaded = true;
 
     if (settings.vectorEnabled && vectorManager.isReady) {
         try {
@@ -8719,6 +15391,122 @@ function onSwipePanel(messageId) {
 }
 
 // ============================================
+// 新用户导航教学
+// ============================================
+
+function _getTutorialSteps() {
+    return [
+        { title: t('tutorial.step1Title'), content: t('tutorial.step1Content'), target: null, action: null },
+        { title: t('tutorial.step2Title'), content: t('tutorial.step2Content'), target: '#horae-btn-ai-scan', action: null },
+        { title: t('tutorial.step3Title'), content: t('tutorial.step3Content'), target: '#horae-autosummary-collapse-toggle',
+          action: () => { const b = document.getElementById('horae-autosummary-collapse-body'); if (b && b.style.display === 'none') document.getElementById('horae-autosummary-collapse-toggle')?.click(); } },
+        { title: t('tutorial.step4Title'), content: t('tutorial.step4Content'), target: '#horae-vector-collapse-toggle',
+          action: () => { const b = document.getElementById('horae-vector-collapse-body'); if (b && b.style.display === 'none') document.getElementById('horae-vector-collapse-toggle')?.click(); } },
+        { title: t('tutorial.step5Title'), content: t('tutorial.step5Content'), target: '#horae-setting-context-depth', action: null },
+        { title: t('tutorial.step6Title'), content: t('tutorial.step6Content'), target: '#horae-setting-injection-position', action: null },
+        { title: t('tutorial.step7Title'), content: t('tutorial.step7Content'), target: '#horae-prompt-collapse-toggle',
+          action: () => { const b = document.getElementById('horae-prompt-collapse-body'); if (b && b.style.display === 'none') document.getElementById('horae-prompt-collapse-toggle')?.click(); } },
+        { title: t('tutorial.step8Title'), content: t('tutorial.step8Content'), target: '#horae-custom-tables-list', action: null },
+        { title: t('tutorial.step9Title'), content: t('tutorial.step9Content'), target: '#horae-setting-send-location-memory', action: null },
+        { title: t('tutorial.step10Title'), content: t('tutorial.step10Content'), target: null, action: null }
+    ];
+}
+
+async function startTutorial() {
+    let drawerOpened = false;
+    const steps = _getTutorialSteps();
+
+    for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        const isLast = i === steps.length - 1;
+
+        // 首个需要面板的步骤时打开抽屉并切到设置 tab
+        if (step.target && !drawerOpened) {
+            const drawerIcon = $('#horae_drawer_icon');
+            if (drawerIcon.hasClass('closedIcon')) {
+                drawerIcon.trigger('click');
+                await new Promise(r => setTimeout(r, 400));
+            }
+            $(`.horae-tab[data-tab="settings"]`).trigger('click');
+            await new Promise(r => setTimeout(r, 200));
+            drawerOpened = true;
+        }
+
+        if (step.action) step.action();
+
+        if (step.target) {
+            await new Promise(r => setTimeout(r, 200));
+            const targetEl = document.querySelector(step.target);
+            if (targetEl) {
+                targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }
+
+        const continued = await showTutorialStep(step, i + 1, steps.length, isLast);
+        if (!continued) break;
+    }
+
+    settings.tutorialCompleted = true;
+    saveSettings();
+}
+
+function showTutorialStep(step, current, total, isLast) {
+    return new Promise(resolve => {
+        document.querySelectorAll('.horae-tutorial-card').forEach(e => e.remove());
+        document.querySelectorAll('.horae-tutorial-highlight').forEach(e => e.classList.remove('horae-tutorial-highlight'));
+
+        // 高亮目标并定位插入点
+        let highlightEl = null;
+        let insertAfterEl = null;
+        if (step.target) {
+            const targetEl = document.querySelector(step.target);
+            if (targetEl) {
+                highlightEl = targetEl.closest('.horae-settings-section') || targetEl;
+                highlightEl.classList.add('horae-tutorial-highlight');
+                insertAfterEl = highlightEl;
+            }
+        }
+
+        const card = document.createElement('div');
+        card.className = 'horae-tutorial-card' + (isLightMode() ? ' horae-light' : '');
+        card.innerHTML = `
+            <div class="horae-tutorial-card-head">
+                <span class="horae-tutorial-step-indicator">${current}/${total}</span>
+                <strong>${step.title}</strong>
+            </div>
+            <div class="horae-tutorial-card-body">${step.content}</div>
+            <div class="horae-tutorial-card-foot">
+                <button class="horae-tutorial-skip">${t('tutorial.skip')}</button>
+                <button class="horae-tutorial-next">${isLast ? t('tutorial.done') : t('tutorial.next')}</button>
+            </div>
+        `;
+
+        // 紧跟在目标区域后面插入，没有目标则放到设置页顶部
+        if (insertAfterEl && insertAfterEl.parentNode) {
+            insertAfterEl.parentNode.insertBefore(card, insertAfterEl.nextSibling);
+        } else {
+            const container = document.getElementById('horae-tab-settings') || document.getElementById('horae_drawer_content');
+            if (container) {
+                container.insertBefore(card, container.firstChild);
+            } else {
+                document.body.appendChild(card);
+            }
+        }
+
+        // 自动滚到高亮目标（教学卡片紧跟其后，一起可见）
+        const scrollTarget = highlightEl || card;
+        setTimeout(() => scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+
+        const cleanup = () => {
+            if (highlightEl) highlightEl.classList.remove('horae-tutorial-highlight');
+            card.remove();
+        };
+        card.querySelector('.horae-tutorial-next').addEventListener('click', () => { cleanup(); resolve(true); });
+        card.querySelector('.horae-tutorial-skip').addEventListener('click', () => { cleanup(); resolve(false); });
+    });
+}
+
+// ============================================
 // 初始化
 // ============================================
 
@@ -8805,7 +15593,7 @@ jQuery(async () => {
         setTimeout(() => startTutorial(), 800);
     }
     
-    appState.isInitialized = true;
-    appState._chatFullyLoaded = true;
+    isInitialized = true;
+    _chatFullyLoaded = true;
     console.log(`[Horae] v${VERSION} 加载完成！作者: SenriYuki`);
 });
