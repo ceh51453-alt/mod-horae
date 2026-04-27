@@ -15232,6 +15232,21 @@ async function onMessageReceived(messageId) {
         }, 1500);
     }
 
+    // BME Node Ingestion — sync Horae parsed meta → BME graph nodes
+    if (!isRegenerate && settings.bmeEnabled) {
+        try {
+            const chat = horaeManager.getChat();
+            const graph = await loadGraphFromChat(chat, { useIdb: true, chatId: getContext()?.chatId });
+            const syncResult = syncMetaToGraph(graph, chat, messageId, settings);
+            if (syncResult.nodesCreated > 0 || syncResult.edgesCreated > 0) {
+                await saveGraphToChat(chat, graph, { useIdb: true, chatId: getContext()?.chatId });
+                console.log(`[Horae BME] Ingested msg #${messageId}: ${syncResult.nodesCreated} nodes, ${syncResult.edgesCreated} edges created`);
+            }
+        } catch (err) {
+            console.warn('[Horae] BME ingestion error:', err);
+        }
+    }
+
     // BME Cognitive Maintenance (Consolidation + Compression + Forgetting)
     if (!isRegenerate && settings.bmeEnabled) {
         setTimeout(() => {
@@ -19267,6 +19282,10 @@ async function triggerBmeMaintenance(chat, settings, tools) {
   isMaintenanceRunning = true;
   try {
     const graph = await loadGraphFromChat(chat, { useIdb: true, chatId: tools.chatId });
+    if (graph.nodes.length === 0) {
+      console.log(`${LOG_PREFIX5} Graph is empty, skipping maintenance.`);
+      return;
+    }
     let graphModified = false;
     if (settings.bmeSleepEnabled !== false) {
       const sleepStats = sleepCycle(graph, settings);
@@ -19307,5 +19326,3 @@ async function triggerBmeMaintenance(chat, settings, tools) {
     isMaintenanceRunning = false;
   }
 }
-
-
