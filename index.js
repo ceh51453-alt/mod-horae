@@ -3,7 +3,14 @@
  * 基于时间锚点的AI记忆增强系统
  * 
  * 作者: SenriYuki
- * 版本: 1.11.13
+ * 版本: 1.12.0
+ * 
+ * 更新日志 (Changelog):
+ * - [v1.12.0] 🧠 核心架构升级: 深度集成 BME (Bionic Memory Ecology) 认知引擎 Phase 2
+ *   + 自动记忆融合 (Consolidation)
+ *   + 层级记忆压缩 (Hierarchical Compression)
+ *   + 睡眠代谢门控 (SleepGate Forgetting)
+ *   + 视角分区检索与时间线权重 (Scoped Memory & Story Timeline)
  */
 
 import { renderExtensionTemplateAsync, getContext, extension_settings } from '/scripts/extensions.js';
