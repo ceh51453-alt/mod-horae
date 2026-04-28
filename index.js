@@ -16037,9 +16037,9 @@ async function openGraphModal(graph) {
         return;
     }
 
-    if (!graph || !graph.nodes) {
+    if (!graph || !graph.nodes || graph.nodes.length === 0) {
         if (window.toastr) {
-            window.toastr.warning('Graph is empty or not loaded.');
+            window.toastr.warning(t('vector.bmeGraphEmpty', 'BME Graph is currently empty. Interact with AI to accumulate memory nodes.'));
         }
         return;
     }

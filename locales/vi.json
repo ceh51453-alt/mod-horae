@@ -729,7 +729,8 @@
         "bmeForceSleep": "Ép Ngủ",
         "bmeForceSleepTitle": "Kích hoạt cổng chuyển hóa giấc ngủ, dọn dẹp ký ức lạnh (Sleep Cycle)",
         "bmeViewGraph": "Xem Đồ Thị",
-        "bmeViewGraphTitle": "Mở giao diện trực quan đồ thị ký ức (View Graph)"
+        "bmeViewGraphTitle": "Mở giao diện trực quan đồ thị ký ức (View Graph)",
+        "bmeGraphEmpty": "Đồ thị BME hiện đang trống. Hãy tương tác với AI để tích lũy ký ức."
     },
     "prompts": {
         "title": "Prompt tùy chỉnh",
